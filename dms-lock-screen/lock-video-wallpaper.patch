@@ -1,6 +1,26 @@
---- a/Modules/Lock/LockScreenContent.qml	2026-10-08 20:27:23.190083403 +0300
-+++ b/Modules/Lock/LockScreenContent.qml	2026-10-08 20:27:35.349241807 +0300
-@@ -252,11 +252,13 @@
+--- a/Common/settings/SettingsSpec.js
++++ b/Common/settings/SettingsSpec.js
+@@ -465,6 +465,7 @@
+     lockScreenVideoCycling: { def: false },
+     lockScreenWallpaperPath: { def: "" },
+     lockScreenWallpaperFillMode: { def: "" },
++    lockScreenWallpaperBlur: { def: true },
+     lockScreenFontFamily: { def: "" },
+     hideBrightnessSlider: { def: false },
+ 
+--- a/Common/SettingsData.qml
++++ b/Common/SettingsData.qml
+@@ -906,6 +906,7 @@
+     property bool lockScreenVideoCycling: false
+     property string lockScreenWallpaperPath: ""
+     property string lockScreenWallpaperFillMode: ""
++    property bool lockScreenWallpaperBlur: true
+     property string lockScreenFontFamily: ""
+     property bool hideBrightnessSlider: false
+ 
+--- a/Modules/Lock/LockScreenContent.qml
++++ b/Modules/Lock/LockScreenContent.qml
+@@ -252,13 +252,16 @@
                  return SettingsData.lockScreenWallpaperFillMode;
              return root.hasCustomWallpaper ? "Fill" : SessionData.getMonitorWallpaperFillMode(root.screenName);
          }
@@ -13,9 +33,13 @@
 -        sourceComponent: fillModeName === "Scrolling" ? scrollWallpaperComp : plainWallpaperComp
 +        sourceComponent: isVideo ? videoWallpaperComp : fillModeName === "Scrolling" ? scrollWallpaperComp : plainWallpaperComp
  
-         layer.enabled: true
+-        layer.enabled: true
++        // lockScreenWallpaperBlur: off draws the wallpaper sharp, without the offscreen blur layer
++        layer.enabled: SettingsData.lockScreenWallpaperBlur
          layer.effect: MultiEffect {
-@@ -274,6 +276,19 @@
+             autoPaddingEnabled: false
+             blurEnabled: true
+@@ -274,6 +277,19 @@
              }
          }
      }
@@ -35,3 +59,21 @@
  
      Component {
          id: plainWallpaperComp
+--- a/Modules/Settings/LockScreenTab.qml
++++ b/Modules/Settings/LockScreenTab.qml
+@@ -391,6 +391,15 @@
+                     onPathSelected: path => SettingsData.set("lockScreenWallpaperPath", path)
+                     onFillModeSelected: mode => SettingsData.set("lockScreenWallpaperFillMode", mode)
+                 }
++
++                SettingsToggleRow {
++                    settingKey: "lockScreenWallpaperBlur"
++                    tags: ["lock", "screen", "wallpaper", "background", "blur"]
++                    text: I18n.tr("Blur Wallpaper")
++                    description: I18n.tr("Blur the lock screen background behind the clock and password field")
++                    checked: SettingsData.lockScreenWallpaperBlur
++                    onToggled: checked => SettingsData.set("lockScreenWallpaperBlur", checked)
++                }
+             }
+ 
+             SettingsCard {

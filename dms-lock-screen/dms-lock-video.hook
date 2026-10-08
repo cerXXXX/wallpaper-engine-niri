@@ -5,6 +5,6 @@ Type = Package
 Target = dms-shell
 
 [Action]
-Description = Patching DMS lock screen to play video wallpapers...
+Description = Patching DMS lock screen (video wallpapers, blur toggle)...
 When = PostTransaction
 Exec = /usr/local/bin/dms-lock-video-patch

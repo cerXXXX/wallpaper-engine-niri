@@ -1,11 +1,18 @@
 #!/usr/bin/env bash
-# Re-apply the DMS lock screen video wallpaper patch after dms-shell installs or
-# upgrades. Leaves the file untouched when the patch is already in or no longer fits.
+# Re-apply the DMS lock screen patch (video wallpapers + the "Blur Wallpaper" toggle) after
+# dms-shell installs or upgrades. Leaves the files untouched when the patch is already in or
+# no longer fits.
 shell=/usr/share/quickshell/dms
 patchfile=/usr/local/share/dms-lock-video/lock-video-wallpaper.patch
+lock="$shell/Modules/Lock/LockScreenContent.qml"
 
-if grep -q lockVideoWallpaper "$shell/Modules/Lock/LockScreenContent.qml"; then
+if grep -q lockScreenWallpaperBlur "$lock"; then
     echo "dms-lock-video: already patched"
+    exit 0
+fi
+if grep -q lockVideoWallpaper "$lock"; then
+    # only reachable by hand: a package upgrade always brings stock files
+    echo "dms-lock-video: an older version of the patch is applied, run install.sh to update it" >&2
     exit 0
 fi
 if ! patch -d "$shell" -p1 --dry-run -s < "$patchfile" >/dev/null; then
@@ -13,4 +20,4 @@ if ! patch -d "$shell" -p1 --dry-run -s < "$patchfile" >/dev/null; then
     exit 0
 fi
 patch -d "$shell" -p1 -s --no-backup-if-mismatch < "$patchfile"
-echo "dms-lock-video: lock screen patched for video wallpapers"
+echo "dms-lock-video: lock screen patched (video wallpapers, blur toggle)"

@@ -11,7 +11,7 @@ My setup for animated [Wallpaper Engine](https://store.steampowered.com/app/4319
 | [dms-wallpaperengine-dashbridge](https://github.com/cerXXXX/dms-wallpaperengine-dashbridge) | DMS plugin (separate repo): the whole Workshop library in the DMS wallpaper picker, keeps the DMS wallpaper from covering the engine, video wallpapers on the lock screen |
 | [dms-wallpaperengine](https://github.com/cerXXXX/dms-wallpaperengine) | Fork of the Linux Wallpaper Engine DMS plugin (separate repo): **Downscale to Screen** toggle, stale screenshot timer fix |
 | [`engine/`](engine) | linux-wallpaperengine patches + PKGBUILD: zero-copy VA-API video, correct video frame pacing, video wallpapers rendered at the video's frame rate, `--downscale-to-output` |
-| [`dms-lock-screen/`](dms-lock-screen) | DMS patch + pacman hook: a video set as the lock screen wallpaper plays behind the clock and password field |
+| [`dms-lock-screen/`](dms-lock-screen) | DMS patch + pacman hook: a video set as the lock screen wallpaper plays behind the clock and password field; a **Blur Wallpaper** toggle for the lock screen background |
 | [`system/`](system) | niri layer rule, `makepkg.conf` without `-debug` packages |
 
 ## Install from scratch
@@ -43,11 +43,13 @@ My setup for animated [Wallpaper Engine](https://store.steampowered.com/app/4319
    wallpaper once, enable **Pause on Battery**, and under Advanced Settings → Performance & Rendering enable
    **Downscale to Screen** (needs the patched engine from step 3).
 6. **niri:** add [`system/niri-layer-rule.kdl`](system/niri-layer-rule.kdl) to `~/.config/niri/config.kdl`.
-7. **Lock screen video** (optional):
+7. **Lock screen video and blur toggle** (optional):
    ```sh
    sudo bash dms-lock-screen/install.sh   # uninstall: sudo bash dms-lock-screen/install.sh uninstall
    dms restart
    ```
+   Rerun it after `git pull` to update an installed older version. The blur is switched in DMS Settings →
+   Lock Screen → Appearance → **Blur Wallpaper** (on by default, as in stock DMS).
 
 After that wallpapers are switched from the DMS dashboard (click the bar clock → Wallpapers).
 
