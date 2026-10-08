@@ -1,0 +1,129 @@
+From 2940babd5c229e4cd2ab70035cdaa63e0c5dbbe2 Mon Sep 17 00:00:00 2001
+From: cerXXXX <polyakovia2009@gmail.com>
+Date: Thu, 8 Oct 2026 19:33:12 +0300
+Subject: [PATCH] perf: pass the Wayland display to mpv so VA-API decoding
+ stays zero-copy
+
+Without MPV_RENDER_PARAM_WL_DISPLAY the libmpv render context has no hwdec
+interop, so hwdec=auto falls back to vaapi-copy and every decoded frame is
+copied through system memory and re-uploaded as a texture.
+
+Expose the driver's wl_display through VideoDriver::getWaylandDisplay ()
+(nullptr for non-Wayland drivers) and hand it to mpv when available.
+
+1080p24 H.264 video wallpaper on Intel Iris Xe (niri): 16% -> 3% of one
+CPU core, hwdec vaapi-copy -> vaapi.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../Render/Drivers/VideoDriver.cpp            |  2 ++
+ .../Render/Drivers/VideoDriver.h              |  6 ++++++
+ .../Render/Drivers/WaylandOpenGLDriver.cpp    |  2 ++
+ .../Render/Drivers/WaylandOpenGLDriver.h      |  1 +
+ .../VideoPlayback/MPV/GLPlayer.cpp            | 19 +++++++++++++++----
+ 5 files changed, 26 insertions(+), 4 deletions(-)
+
+diff --git a/src/WallpaperEngine/Render/Drivers/VideoDriver.cpp b/src/WallpaperEngine/Render/Drivers/VideoDriver.cpp
+index 573ce77..0000c35 100644
+--- a/src/WallpaperEngine/Render/Drivers/VideoDriver.cpp
++++ b/src/WallpaperEngine/Render/Drivers/VideoDriver.cpp
+@@ -6,6 +6,8 @@ using namespace WallpaperEngine::Render::Drivers;
+ VideoDriver::VideoDriver (WallpaperApplication& app, MouseInput& mouseInput) :
+     m_app (app), m_inputContext (mouseInput) { }
+ 
++wl_display* VideoDriver::getWaylandDisplay () const { return nullptr; }
++
+ WallpaperApplication& VideoDriver::getApp () const { return this->m_app; }
+ 
+ InputContext& VideoDriver::getInputContext () { return this->m_inputContext; }
+\ No newline at end of file
+diff --git a/src/WallpaperEngine/Render/Drivers/VideoDriver.h b/src/WallpaperEngine/Render/Drivers/VideoDriver.h
+index 505d18e..a4d57f6 100644
+--- a/src/WallpaperEngine/Render/Drivers/VideoDriver.h
++++ b/src/WallpaperEngine/Render/Drivers/VideoDriver.h
+@@ -7,6 +7,8 @@
+ #include <glm/vec4.hpp>
+ #include <string>
+ 
++struct wl_display;
++
+ namespace WallpaperEngine::Application {
+ class WallpaperApplication;
+ }
+@@ -67,6 +69,10 @@ public:
+      * @return GetProcAddress for this video driver
+      */
+     [[nodiscard]] virtual void* getProcAddress (const char* name) const = 0;
++    /**
++     * @return The Wayland display this driver renders to, nullptr if it doesn't render through Wayland
++     */
++    [[nodiscard]] virtual wl_display* getWaylandDisplay () const;
+     /**
+      * Process events on the driver and renders a frame
+      */
+diff --git a/src/WallpaperEngine/Render/Drivers/WaylandOpenGLDriver.cpp b/src/WallpaperEngine/Render/Drivers/WaylandOpenGLDriver.cpp
+index e4b722d..2b63164 100644
+--- a/src/WallpaperEngine/Render/Drivers/WaylandOpenGLDriver.cpp
++++ b/src/WallpaperEngine/Render/Drivers/WaylandOpenGLDriver.cpp
+@@ -458,6 +458,8 @@ void* WaylandOpenGLDriver::getProcAddress (const char* name) const {
+     return reinterpret_cast<void*> (eglGetProcAddress (name));
+ }
+ 
++wl_display* WaylandOpenGLDriver::getWaylandDisplay () const { return this->m_waylandContext.display; }
++
+ WaylandOpenGLDriver::WaylandContext* WaylandOpenGLDriver::getWaylandContext () { return &this->m_waylandContext; }
+ 
+ Output::WaylandOutputViewport* WaylandOpenGLDriver::surfaceToViewport (const wl_surface* surface) const {
+diff --git a/src/WallpaperEngine/Render/Drivers/WaylandOpenGLDriver.h b/src/WallpaperEngine/Render/Drivers/WaylandOpenGLDriver.h
+index a42a59f..db66657 100644
+--- a/src/WallpaperEngine/Render/Drivers/WaylandOpenGLDriver.h
++++ b/src/WallpaperEngine/Render/Drivers/WaylandOpenGLDriver.h
+@@ -72,6 +72,7 @@ public:
+     uint32_t getFrameCounter () const override;
+     void dispatchEventQueue () override;
+     [[nodiscard]] void* getProcAddress (const char* name) const override;
++    [[nodiscard]] wl_display* getWaylandDisplay () const override;
+ 
+     void onLayerClose (Output::WaylandOutputViewport*);
+     Output::WaylandOutputViewport* surfaceToViewport (const wl_surface*) const;
+diff --git a/src/WallpaperEngine/VideoPlayback/MPV/GLPlayer.cpp b/src/WallpaperEngine/VideoPlayback/MPV/GLPlayer.cpp
+index 39f1ff8..ad80633 100644
+--- a/src/WallpaperEngine/VideoPlayback/MPV/GLPlayer.cpp
++++ b/src/WallpaperEngine/VideoPlayback/MPV/GLPlayer.cpp
+@@ -5,6 +5,8 @@
+ #include <mpv/render_gl.h>
+ #include <mpv/stream_cb.h>
+ 
++#include <vector>
++
+ using namespace WallpaperEngine::VideoPlayback::MPV;
+ 
+ void* get_proc_address (void* ctx, const char* name) {
+@@ -234,11 +236,20 @@ void GLPlayer::init () {
+ 
+     // initialize gl context for mpv
+     mpv_opengl_init_params gl_init_params { get_proc_address, this };
+-    mpv_render_param params[] { { MPV_RENDER_PARAM_API_TYPE, const_cast<char*> (MPV_RENDER_API_TYPE_OPENGL) },
+-				{ MPV_RENDER_PARAM_OPENGL_INIT_PARAMS, &gl_init_params },
+-				{ MPV_RENDER_PARAM_INVALID, nullptr } };
++    std::vector<mpv_render_param> params {
++	{ MPV_RENDER_PARAM_API_TYPE, const_cast<char*> (MPV_RENDER_API_TYPE_OPENGL) },
++	{ MPV_RENDER_PARAM_OPENGL_INIT_PARAMS, &gl_init_params },
++    };
++
++    // without the native display mpv has no hwdec interop and falls back to copying
++    // every decoded frame through system memory (vaapi-copy)
++    if (wl_display* display = this->getContext ().getDriver ().getWaylandDisplay (); display != nullptr) {
++	params.push_back ({ MPV_RENDER_PARAM_WL_DISPLAY, display });
++    }
++
++    params.push_back ({ MPV_RENDER_PARAM_INVALID, nullptr });
+ 
+-    if (mpv_render_context_create (&this->m_renderContext, this->m_handle, params) < 0) {
++    if (mpv_render_context_create (&this->m_renderContext, this->m_handle, params.data ()) < 0) {
+ 	sLog.exception ("Failed to initialize MPV's GL context");
+     }
+ 
+-- 
+2.55.0
+

@@ -1,0 +1,7 @@
+// Add to ~/.config/niri/config.kdl.
+// Keeps linux-wallpaperengine on the backdrop instead of cloning it into every
+// workspace card in the overview (the engine must run with --layer background).
+layer-rule {
+    match namespace="^linux-wallpaperengine$"
+    place-within-backdrop true
+}

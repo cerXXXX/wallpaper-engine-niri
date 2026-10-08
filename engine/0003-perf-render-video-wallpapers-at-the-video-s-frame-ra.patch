@@ -1,0 +1,284 @@
+From b060a9168f3cbdcf7ee0a7357faa283b692e1a42 Mon Sep 17 00:00:00 2001
+From: cerXXXX <polyakovia2009@gmail.com>
+Date: Thu, 8 Oct 2026 21:51:52 +0300
+Subject: [PATCH 3/3] perf: render video wallpapers at the video's frame rate
+
+The render loop runs at --fps (30 by default) even when the only thing on
+screen is a 24 fps video, so every fifth frame redraws the same video frame.
+
+GLPlayer now reads mpv's container-fps when the video is configured, CVideo
+reports it through a new CWallpaper::getContentFrameRate () (0 = can change on
+any frame), and the main loop lowers the target rate to the fastest video when
+every output shows a plain video. --fps stays the upper bound, and scenes, web
+wallpapers and videos inside scenes keep the full rate. The Wayland and GLFW
+drivers now read the target rate every frame instead of caching --fps.
+
+1080p24 video wallpaper on niri: 23.4 rendered frames/s instead of 29.0 (with the
+previous fix only); scene wallpapers unchanged at ~29.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../Application/ApplicationContext.cpp        |  7 ++++++
+ .../Application/ApplicationContext.h          |  5 ++++
+ .../Application/ApplicationState.h            |  8 +++++++
+ .../Application/WallpaperApplication.cpp      | 23 +++++++++++++++++++
+ .../Application/WallpaperApplication.h        |  4 ++++
+ src/WallpaperEngine/Render/CWallpaper.cpp     |  2 ++
+ src/WallpaperEngine/Render/CWallpaper.h       |  5 ++++
+ .../Render/Drivers/GLFWOpenGLDriver.cpp       |  4 +++-
+ .../Render/Drivers/WaylandOpenGLDriver.cpp    |  4 +++-
+ .../Render/Wallpapers/CVideo.cpp              |  2 ++
+ .../Render/Wallpapers/CVideo.h                |  1 +
+ .../VideoPlayback/MPV/GLPlayer.cpp            |  9 ++++++++
+ .../VideoPlayback/MPV/GLPlayer.h              |  5 ++++
+ 13 files changed, 77 insertions(+), 2 deletions(-)
+
+diff --git a/src/WallpaperEngine/Application/ApplicationContext.cpp b/src/WallpaperEngine/Application/ApplicationContext.cpp
+index 510ec95..9ba11c4 100644
+--- a/src/WallpaperEngine/Application/ApplicationContext.cpp
++++ b/src/WallpaperEngine/Application/ApplicationContext.cpp
+@@ -702,6 +702,13 @@ void ApplicationContext::loadSettingsFromArgv () {
+     }
+ }
+ 
++float ApplicationContext::getTargetFrameRate () const {
++    const float maximum = static_cast<float> (this->settings.render.maximumFPS);
++    const float content = this->state.render.contentFrameRate;
++
++    return content > 0.0f ? std::min (maximum, content) : maximum;
++}
++
+ int ApplicationContext::getArgc () const { return this->m_argc; }
+ 
+ char** ApplicationContext::getArgv () const { return this->m_argv; }
+diff --git a/src/WallpaperEngine/Application/ApplicationContext.h b/src/WallpaperEngine/Application/ApplicationContext.h
+index 3af58c3..55650d9 100644
+--- a/src/WallpaperEngine/Application/ApplicationContext.h
++++ b/src/WallpaperEngine/Application/ApplicationContext.h
+@@ -239,6 +239,11 @@ public:
+ 
+     ApplicationState state;
+ 
++    /**
++     * @return The frame rate to render at: --fps, lowered to the content's own rate when that is known and lower
++     */
++    [[nodiscard]] float getTargetFrameRate () const;
++
+     [[nodiscard]] int getArgc () const;
+     [[nodiscard]] char** getArgv () const;
+ 
+diff --git a/src/WallpaperEngine/Application/ApplicationState.h b/src/WallpaperEngine/Application/ApplicationState.h
+index 719e725..27757c2 100644
+--- a/src/WallpaperEngine/Application/ApplicationState.h
++++ b/src/WallpaperEngine/Application/ApplicationState.h
+@@ -20,5 +20,13 @@ public:
+     struct {
+ 	bool enabled;
+     } mouse {};
++
++    struct {
++	/**
++	 * Frame rate the current wallpapers actually produce, 0 when they need the full --fps budget
++	 * (anything but plain video wallpapers, or a video whose rate isn't known yet)
++	 */
++	float contentFrameRate;
++    } render {};
+ };
+ } // namespace WallpaperEngine::Application
+\ No newline at end of file
+diff --git a/src/WallpaperEngine/Application/WallpaperApplication.cpp b/src/WallpaperEngine/Application/WallpaperApplication.cpp
+index c9107af..b4b6356 100644
+--- a/src/WallpaperEngine/Application/WallpaperApplication.cpp
++++ b/src/WallpaperEngine/Application/WallpaperApplication.cpp
+@@ -473,6 +473,27 @@ void WallpaperApplication::advancePlaylist (
+     playlist.nextSwitch = now + std::chrono::minutes (delayMinutes);
+ }
+ 
++void WallpaperApplication::updateContentFrameRate () {
++    // all outputs share one render loop, so it can only slow down when every wallpaper
++    // has a known rate, and then only to the fastest of them
++    float rate = 0.0f;
++
++    if (this->m_renderContext != nullptr) {
++	for (const auto& [screen, wallpaper] : this->m_renderContext->getWallpapers ()) {
++	    const double wallpaperRate = wallpaper ? wallpaper->getContentFrameRate () : 0.0;
++
++	    if (wallpaperRate <= 0.0) {
++		rate = 0.0f;
++		break;
++	    }
++
++	    rate = std::max (rate, static_cast<float> (wallpaperRate));
++	}
++    }
++
++    this->m_context.state.render.contentFrameRate = rate;
++}
++
+ void WallpaperApplication::updatePlaylists () {
+     if (this->m_activePlaylists.empty ()) {
+ 	return;
+@@ -891,6 +912,8 @@ void WallpaperApplication::render () {
+ 	m_mediaSource->update ();
+ 	// update input information
+ 	m_videoDriver->getInputContext ().update ();
++	// don't render faster than the wallpapers change
++	this->updateContentFrameRate ();
+ 	// process driver events
+ 	m_videoDriver->dispatchEventQueue ();
+ 
+diff --git a/src/WallpaperEngine/Application/WallpaperApplication.h b/src/WallpaperEngine/Application/WallpaperApplication.h
+index 1d1302a..79c3155 100644
+--- a/src/WallpaperEngine/Application/WallpaperApplication.h
++++ b/src/WallpaperEngine/Application/WallpaperApplication.h
+@@ -152,6 +152,10 @@ private:
+ 
+     void initializePlaylists ();
+     void updatePlaylists ();
++    /**
++     * Lowers the render rate to the videos' own frame rate when every wallpaper is a plain video
++     */
++    void updateContentFrameRate ();
+     void advancePlaylist (
+ 	const std::string& screen, ActivePlaylist& playlist, const std::chrono::steady_clock::time_point& now
+     );
+diff --git a/src/WallpaperEngine/Render/CWallpaper.cpp b/src/WallpaperEngine/Render/CWallpaper.cpp
+index d0f7eab..28d9575 100644
+--- a/src/WallpaperEngine/Render/CWallpaper.cpp
++++ b/src/WallpaperEngine/Render/CWallpaper.cpp
+@@ -309,6 +309,8 @@ void CWallpaper::render (
+ 
+ void CWallpaper::setPause (bool newState) { }
+ 
++double CWallpaper::getContentFrameRate () const { return 0.0; }
++
+ void CWallpaper::setupFramebuffers () {
+     const uint32_t width = this->getWidth ();
+     const uint32_t height = this->getHeight ();
+diff --git a/src/WallpaperEngine/Render/CWallpaper.h b/src/WallpaperEngine/Render/CWallpaper.h
+index 87b2b07..67a798b 100644
+--- a/src/WallpaperEngine/Render/CWallpaper.h
++++ b/src/WallpaperEngine/Render/CWallpaper.h
+@@ -127,6 +127,11 @@ public:
+      */
+     [[nodiscard]] virtual int getHeight () const = 0;
+ 
++    /**
++     * @return The rate this wallpaper's content changes at, 0 if it can change on any frame
++     */
++    [[nodiscard]] virtual double getContentFrameRate () const;
++
+     /**
+      * Creates a new instance of CWallpaper based on the information provided by the read backgrounds
+      *
+diff --git a/src/WallpaperEngine/Render/Drivers/GLFWOpenGLDriver.cpp b/src/WallpaperEngine/Render/Drivers/GLFWOpenGLDriver.cpp
+index 01063d9..1527fc5 100644
+--- a/src/WallpaperEngine/Render/Drivers/GLFWOpenGLDriver.cpp
++++ b/src/WallpaperEngine/Render/Drivers/GLFWOpenGLDriver.cpp
+@@ -108,7 +108,9 @@ glm::ivec2 GLFWOpenGLDriver::getFramebufferSize () const {
+ uint32_t GLFWOpenGLDriver::getFrameCounter () const { return this->m_frameCounter; }
+ 
+ void GLFWOpenGLDriver::dispatchEventQueue () {
+-    static float startTime, endTime, minimumTime = 1.0f / this->m_context.settings.render.maximumFPS;
++    static float startTime, endTime;
++    // the target rate can drop below --fps while only videos are shown, so re-read it every frame
++    const float minimumTime = 1.0f / this->m_context.getTargetFrameRate ();
+     // get the start time of the frame
+     startTime = this->getRenderTime ();
+     // clear the screen
+diff --git a/src/WallpaperEngine/Render/Drivers/WaylandOpenGLDriver.cpp b/src/WallpaperEngine/Render/Drivers/WaylandOpenGLDriver.cpp
+index e4b722d..881dc74 100644
+--- a/src/WallpaperEngine/Render/Drivers/WaylandOpenGLDriver.cpp
++++ b/src/WallpaperEngine/Render/Drivers/WaylandOpenGLDriver.cpp
+@@ -410,7 +410,9 @@ void WaylandOpenGLDriver::dispatchEventQueue () {
+ 
+     // TODO: WRITE A NON-BLOCKING VERSION OF THIS ONCE PARTICLE SIMULATION STARTS WORKING
+     // TODO: OTHERWISE wl_display_dispatch WILL BLOCK IF NO SURFACES ARE BEING DRAWN
+-    static float startTime, endTime, minimumTime = 1.0f / this->m_context.settings.render.maximumFPS;
++    static float startTime, endTime;
++    // the target rate can drop below --fps while only videos are shown, so re-read it every frame
++    const float minimumTime = 1.0f / this->m_context.getTargetFrameRate ();
+     // get the start time of the frame
+     startTime = this->getRenderTime ();
+ 
+diff --git a/src/WallpaperEngine/Render/Wallpapers/CVideo.cpp b/src/WallpaperEngine/Render/Wallpapers/CVideo.cpp
+index bf61e2a..27c202c 100644
+--- a/src/WallpaperEngine/Render/Wallpapers/CVideo.cpp
++++ b/src/WallpaperEngine/Render/Wallpapers/CVideo.cpp
+@@ -64,3 +64,5 @@ void CVideo::setPause (bool newState) {
+ int CVideo::getWidth () const { return this->m_player ? this->m_player->getWidth () : 16; }
+ 
+ int CVideo::getHeight () const { return this->m_player ? this->m_player->getHeight () : 16; }
++
++double CVideo::getContentFrameRate () const { return this->m_player ? this->m_player->getFrameRate () : 0.0; }
+diff --git a/src/WallpaperEngine/Render/Wallpapers/CVideo.h b/src/WallpaperEngine/Render/Wallpapers/CVideo.h
+index a0813d8..dd075e1 100644
+--- a/src/WallpaperEngine/Render/Wallpapers/CVideo.h
++++ b/src/WallpaperEngine/Render/Wallpapers/CVideo.h
+@@ -20,6 +20,7 @@ public:
+ 
+     [[nodiscard]] int getWidth () const override;
+     [[nodiscard]] int getHeight () const override;
++    [[nodiscard]] double getContentFrameRate () const override;
+ 
+     void setPause (bool newState) override;
+ 
+diff --git a/src/WallpaperEngine/VideoPlayback/MPV/GLPlayer.cpp b/src/WallpaperEngine/VideoPlayback/MPV/GLPlayer.cpp
+index f0e674a..19e9fbb 100644
+--- a/src/WallpaperEngine/VideoPlayback/MPV/GLPlayer.cpp
++++ b/src/WallpaperEngine/VideoPlayback/MPV/GLPlayer.cpp
+@@ -138,6 +138,12 @@ void GLPlayer::render () const {
+ 	    continue;
+ 	}
+ 
++	double frameRate;
++
++	if (mpv_get_property (this->m_handle, "container-fps", MPV_FORMAT_DOUBLE, &frameRate) >= 0 && frameRate > 0.0) {
++	    this->m_frameRate = frameRate;
++	}
++
+ 	int64_t width, height;
+ 
+ 	if (mpv_get_property (this->m_handle, "dwidth", MPV_FORMAT_INT64, &width) < 0) {
+@@ -181,6 +187,7 @@ void GLPlayer::render () const {
+ 
+ int GLPlayer::getWidth () const { return this->m_width; }
+ int GLPlayer::getHeight () const { return this->m_height; }
++double GLPlayer::getFrameRate () const { return this->m_frameRate; }
+ 
+ void GLPlayer::prepareGL () {
+     if (!this->m_doWeOwnFramebuffer || this->m_fbo != GL_NONE) {
+@@ -297,4 +304,6 @@ void GLPlayer::stop () {
+ 	mpv_terminate_destroy (this->m_handle);
+ 	this->m_handle = nullptr;
+     }
++
++    this->m_frameRate = 0.0;
+ }
+\ No newline at end of file
+diff --git a/src/WallpaperEngine/VideoPlayback/MPV/GLPlayer.h b/src/WallpaperEngine/VideoPlayback/MPV/GLPlayer.h
+index 2cf788a..2973f64 100644
+--- a/src/WallpaperEngine/VideoPlayback/MPV/GLPlayer.h
++++ b/src/WallpaperEngine/VideoPlayback/MPV/GLPlayer.h
+@@ -50,6 +50,10 @@ public:
+ 
+     int getWidth () const;
+     int getHeight () const;
++    /**
++     * @return The video's frame rate as stored in the file, 0 until playback starts or if the file doesn't specify it
++     */
++    double getFrameRate () const;
+ 
+ private:
+     void prepareGL ();
+@@ -65,6 +69,7 @@ protected:
+     GLuint m_fbo = GL_NONE;
+     mutable int64_t m_width;
+     mutable int64_t m_height;
++    mutable double m_frameRate = 0.0;
+     mpv_handle* m_handle = nullptr;
+     mpv_render_context* m_renderContext = nullptr;
+     double m_volume = 0.0f;
+-- 
+2.55.0
+

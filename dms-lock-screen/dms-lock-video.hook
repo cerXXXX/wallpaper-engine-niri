@@ -1,0 +1,10 @@
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Package
+Target = dms-shell
+
+[Action]
+Description = Patching DMS lock screen to play video wallpapers...
+When = PostTransaction
+Exec = /usr/local/bin/dms-lock-video-patch

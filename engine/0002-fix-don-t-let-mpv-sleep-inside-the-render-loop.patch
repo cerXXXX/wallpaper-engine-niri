@@ -1,0 +1,41 @@
+From 0bd48eecfad68a0d30406f1ec542b3cfe2eea543 Mon Sep 17 00:00:00 2001
+From: cerXXXX <polyakovia2009@gmail.com>
+Date: Thu, 8 Oct 2026 21:51:52 +0300
+Subject: [PATCH 2/3] fix: don't let mpv sleep inside the render loop
+
+mpv_render_context_render () defaults to MPV_RENDER_PARAM_BLOCK_FOR_TARGET_TIME
+= 1 and sleeps until the next video frame is due. The render loop already
+paces itself (frame callback plus the --fps sleep), so the two waits stack up
+and, depending on how the video's frame times fall against that pacing, a
+video wallpaper can update far below its frame rate.
+
+1080p24 H.264 wallpaper on niri: 13 rendered frames/s before, 23.4 after
+(counted from wl_surface.attach); playback speed checked against a video with
+a burned-in clock.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/WallpaperEngine/VideoPlayback/MPV/GLPlayer.cpp | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/src/WallpaperEngine/VideoPlayback/MPV/GLPlayer.cpp b/src/WallpaperEngine/VideoPlayback/MPV/GLPlayer.cpp
+index 39f1ff8..f0e674a 100644
+--- a/src/WallpaperEngine/VideoPlayback/MPV/GLPlayer.cpp
++++ b/src/WallpaperEngine/VideoPlayback/MPV/GLPlayer.cpp
+@@ -167,9 +167,13 @@ void GLPlayer::render () const {
+ 
+     // no need to flip as it'll be handled by the wallpaper rendering code
+     int flip_y = 0;
++    // the render loop already paces frames; letting mpv also sleep until the next video
++    // frame's display time stacks both waits and roughly halves the video's frame rate
++    int block_for_target_time = 0;
+ 
+     mpv_render_param params[] = { { MPV_RENDER_PARAM_OPENGL_FBO, &fbo },
+ 				  { MPV_RENDER_PARAM_FLIP_Y, &flip_y },
++				  { MPV_RENDER_PARAM_BLOCK_FOR_TARGET_TIME, &block_for_target_time },
+ 				  { MPV_RENDER_PARAM_INVALID, nullptr } };
+ 
+     mpv_render_context_render (this->m_renderContext, params);
+-- 
+2.55.0
+

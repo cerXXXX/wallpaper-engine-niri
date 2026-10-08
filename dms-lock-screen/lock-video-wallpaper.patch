@@ -1,0 +1,37 @@
+--- a/Modules/Lock/LockScreenContent.qml	2026-10-08 20:27:23.190083403 +0300
++++ b/Modules/Lock/LockScreenContent.qml	2026-10-08 20:27:35.349241807 +0300
+@@ -252,11 +252,13 @@
+                 return SettingsData.lockScreenWallpaperFillMode;
+             return root.hasCustomWallpaper ? "Fill" : SessionData.getMonitorWallpaperFillMode(root.screenName);
+         }
++        // lockVideoWallpaper: a video set as the lock screen wallpaper plays as a looping background
++        readonly property bool isVideo: root.hasCustomWallpaper && /\.(mp4|mkv|webm|mov|avi|m4v)$/i.test(SettingsData.lockScreenWallpaperPath)
+ 
+         active: wallpaperSource !== ""
+         asynchronous: false
+ 
+-        sourceComponent: fillModeName === "Scrolling" ? scrollWallpaperComp : plainWallpaperComp
++        sourceComponent: isVideo ? videoWallpaperComp : fillModeName === "Scrolling" ? scrollWallpaperComp : plainWallpaperComp
+ 
+         layer.enabled: true
+         layer.effect: MultiEffect {
+@@ -274,6 +276,19 @@
+             }
+         }
+     }
++
++    // Loaded by path like VideoScreensaver does, so a missing QtMultimedia leaves
++    // the plain background instead of breaking the lock screen.
++    Component {
++        id: videoWallpaperComp
++        Loader {
++            source: "VideoScreensaverPlayer.qml"
++            onLoaded: {
++                item.source = wallpaperBackground.wallpaperSource;
++                item.play();
++            }
++        }
++    }
+ 
+     Component {
+         id: plainWallpaperComp

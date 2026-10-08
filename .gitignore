@@ -1,0 +1,4 @@
+engine/src/
+engine/pkg/
+engine/linux-wallpaperengine-git/
+engine/*.pkg.tar.*
