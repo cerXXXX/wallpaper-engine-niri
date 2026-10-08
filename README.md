@@ -11,7 +11,7 @@ My setup for animated [Wallpaper Engine](https://store.steampowered.com/app/4319
 | [dms-wallpaperengine-dashbridge](https://github.com/cerXXXX/dms-wallpaperengine-dashbridge) | DMS plugin (separate repo): the whole Workshop library in the DMS wallpaper picker, keeps the DMS wallpaper from covering the engine, video wallpapers on the lock screen |
 | [dms-wallpaperengine](https://github.com/cerXXXX/dms-wallpaperengine) | Fork of the Linux Wallpaper Engine DMS plugin (separate repo): **Downscale to Screen** toggle, stale screenshot timer fix |
 | [`engine/`](engine) | linux-wallpaperengine patches + PKGBUILD: zero-copy VA-API video, correct video frame pacing, video wallpapers rendered at the video's frame rate, `--downscale-to-output` |
-| [`dms-lock-screen/`](dms-lock-screen) | DMS patch + pacman hook: a video set as the lock screen wallpaper plays behind the clock and password field; a **Blur Wallpaper** toggle for the lock screen background |
+| [`dms-lock-screen/`](dms-lock-screen) | DMS patch + pacman hook: a video set as the lock screen wallpaper (or the desktop's Wallpaper Engine video) plays behind the clock and password field; a **Blur Wallpaper** toggle for the lock screen background |
 | [`system/`](system) | niri layer rule, `makepkg.conf` without `-debug` packages |
 
 ## Install from scratch
@@ -48,8 +48,10 @@ My setup for animated [Wallpaper Engine](https://store.steampowered.com/app/4319
    sudo bash dms-lock-screen/install.sh   # uninstall: sudo bash dms-lock-screen/install.sh uninstall
    dms restart
    ```
-   Rerun it after `git pull` to update an installed older version. The blur is switched in DMS Settings →
-   Lock Screen → Appearance → **Blur Wallpaper** (on by default, as in stock DMS).
+   Rerun it after `git pull` to update an installed older version. With no custom lock screen wallpaper, a monitor
+   showing a Wallpaper Engine **video** wallpaper plays the same video on the lock screen (the plugin fork publishes
+   it; `dms ipc call linuxWallpaperEngine lockVideos` shows what it publishes). The blur is switched in DMS
+   Settings → Lock Screen → Appearance → **Blur Wallpaper** (on by default, as in stock DMS).
 
 After that wallpapers are switched from the DMS dashboard (click the bar clock → Wallpapers).
 
@@ -108,7 +110,8 @@ no longer applies, `prepare()` stops with the failing hunk.
 - `--downscale-to-output` sizes the framebuffers once, when the wallpaper loads; after changing the output's mode or
   scale the engine needs a restart.
 - A 24 fps video on a 60 Hz panel without VRR can't be shown evenly (3:2 pulldown).
-- Only video wallpapers animate on the lock screen; the lock screen can't host the engine.
+- Only video wallpapers animate on the lock screen. While the session is locked niri draws nothing but the lock
+  surface (ext-session-lock), so the engine's layer can't show through; scenes show their static screenshot.
 
 ## Licenses
 

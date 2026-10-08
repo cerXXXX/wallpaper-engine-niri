@@ -20,12 +20,33 @@
  
 --- a/Modules/Lock/LockScreenContent.qml
 +++ b/Modules/Lock/LockScreenContent.qml
-@@ -252,13 +252,16 @@
+@@ -241,9 +241,20 @@
+         id: wallpaperBackground
+         anchors.fill: parent
+ 
++        // lockVideoWallpaper: the video the linuxWallpaperEngine plugin shows on this monitor
++        // (it publishes them as the lockVideos global var); the desktop wallpaper itself is only
++        // the engine's static screenshot
++        readonly property string engineVideo: {
++            if (root.hasCustomWallpaper)
++                return "";
++            var vars = PluginService.globalVars["linuxWallpaperEngine"] || {};
++            return (vars.lockVideos || {})[root.screenName] || "";
++        }
+         readonly property string wallpaperSource: {
+             if (root.hasCustomWallpaper)
+                 return root.encodeFileUrl(SettingsData.lockScreenWallpaperPath);
++            if (engineVideo !== "")
++                return root.encodeFileUrl(engineVideo);
+             var w = SessionData.getMonitorWallpaper(screenName);
+             return (w && !w.startsWith("#")) ? encodeFileUrl(w) : "";
+         }
+@@ -252,13 +263,16 @@
                  return SettingsData.lockScreenWallpaperFillMode;
              return root.hasCustomWallpaper ? "Fill" : SessionData.getMonitorWallpaperFillMode(root.screenName);
          }
 +        // lockVideoWallpaper: a video set as the lock screen wallpaper plays as a looping background
-+        readonly property bool isVideo: root.hasCustomWallpaper && /\.(mp4|mkv|webm|mov|avi|m4v)$/i.test(SettingsData.lockScreenWallpaperPath)
++        readonly property bool isVideo: engineVideo !== "" || (root.hasCustomWallpaper && /\.(mp4|mkv|webm|mov|avi|m4v)$/i.test(SettingsData.lockScreenWallpaperPath))
  
          active: wallpaperSource !== ""
          asynchronous: false
@@ -39,7 +60,7 @@
          layer.effect: MultiEffect {
              autoPaddingEnabled: false
              blurEnabled: true
-@@ -274,6 +277,19 @@
+@@ -274,6 +288,31 @@
              }
          }
      }
@@ -49,10 +70,22 @@
 +    Component {
 +        id: videoWallpaperComp
 +        Loader {
++            id: videoLoader
 +            source: "VideoScreensaverPlayer.qml"
 +            onLoaded: {
 +                item.source = wallpaperBackground.wallpaperSource;
 +                item.play();
++            }
++
++            // the desktop video can change while locked (playlist rotation)
++            Connections {
++                target: wallpaperBackground
++                function onWallpaperSourceChanged() {
++                    if (!videoLoader.item || !wallpaperBackground.isVideo)
++                        return;
++                    videoLoader.item.source = wallpaperBackground.wallpaperSource;
++                    videoLoader.item.play();
++                }
 +            }
 +        }
 +    }

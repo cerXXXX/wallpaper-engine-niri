@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
-# Install, update (or with "uninstall": remove) the DMS lock screen patch: video wallpapers
-# and the "Blur Wallpaper" toggle.
+# Install, update (or with "uninstall": remove) the DMS lock screen patch: video wallpapers,
+# the desktop's Wallpaper Engine video on the lock screen and the "Blur Wallpaper" toggle.
 # usage: sudo bash install.sh [uninstall]
 set -e
 here=$(cd "$(dirname "$0")" && pwd)
 shell=/usr/share/quickshell/dms
 lock="$shell/Modules/Lock/LockScreenContent.qml"
 installed=/usr/local/share/dms-lock-video/lock-video-wallpaper.patch
+# only the current version of the patch has this (keep in sync with dms-lock-video-patch)
+marker=lockVideos
 
 # take out whatever version is applied, using the patch file it was applied from
 unpatch() {
@@ -23,8 +25,8 @@ if [ "${1:-}" = "uninstall" ]; then
     exit 0
 fi
 
-# updating from the video-only version: revert it before the new patch goes in
-if ! grep -q lockScreenWallpaperBlur "$lock"; then
+# updating from an older version: revert it before the new patch goes in
+if ! grep -q "$marker" "$lock"; then
     unpatch
 fi
 
