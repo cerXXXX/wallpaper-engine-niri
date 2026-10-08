@@ -9,7 +9,7 @@ My setup for animated [Wallpaper Engine](https://store.steampowered.com/app/4319
 | Part | What it does |
 |---|---|
 | [dms-wallpaperengine-dashbridge](https://github.com/cerXXXX/dms-wallpaperengine-dashbridge) | DMS plugin (separate repo): the whole Workshop library in the DMS wallpaper picker, keeps the DMS wallpaper from covering the engine, video wallpapers on the lock screen |
-| [dms-wallpaperengine](https://github.com/cerXXXX/dms-wallpaperengine) (branch `downscale-to-output`) | Fork of the Linux Wallpaper Engine DMS plugin (separate repo): **Downscale to Screen** toggle, stale screenshot timer fix |
+| [dms-wallpaperengine](https://github.com/cerXXXX/dms-wallpaperengine) | Fork of the Linux Wallpaper Engine DMS plugin (separate repo): **Downscale to Screen** toggle, stale screenshot timer fix |
 | [`engine/`](engine) | linux-wallpaperengine patches + PKGBUILD: zero-copy VA-API video, correct video frame pacing, video wallpapers rendered at the video's frame rate, `--downscale-to-output` |
 | [`dms-lock-screen/`](dms-lock-screen) | DMS patch + pacman hook: a video set as the lock screen wallpaper plays behind the clock and password field |
 | [`system/`](system) | niri layer rule, `makepkg.conf` without `-debug` packages |
@@ -26,18 +26,18 @@ My setup for animated [Wallpaper Engine](https://store.steampowered.com/app/4319
    ```
 4. **DMS plugins:**
    ```sh
-   git clone -b downscale-to-output https://github.com/cerXXXX/dms-wallpaperengine \
+   git clone https://github.com/cerXXXX/dms-wallpaperengine \
        ~/.config/DankMaterialShell/plugins/linuxWallpaperEngine
    git clone https://github.com/cerXXXX/dms-wallpaperengine-dashbridge \
        ~/.config/DankMaterialShell/plugins/weDashBridge
    dms ipc call plugins enable linuxWallpaperEngine
    dms ipc call plugins enable weDashBridge
    ```
-   An existing install of the upstream plugin switches to the fork with
+   An existing install of the upstream plugin (a git checkout of sgtaziz's `main`) switches to the fork with
    ```sh
    cd ~/.config/DankMaterialShell/plugins/linuxWallpaperEngine
-   git remote add fork https://github.com/cerXXXX/dms-wallpaperengine
-   git fetch fork && git switch -c downscale-to-output fork/downscale-to-output
+   git remote set-url origin https://github.com/cerXXXX/dms-wallpaperengine
+   git pull --ff-only
    ```
 5. **Plugin settings** (DMS Settings → Plugins → Linux Wallpaper Engine): enable **Generate static wallpaper**, pick a
    wallpaper once, enable **Pause on Battery**, and under Advanced Settings → Performance & Rendering enable
