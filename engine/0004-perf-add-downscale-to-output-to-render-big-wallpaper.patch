@@ -1,0 +1,715 @@
+From 924c4218cb252433b2909eab5c85784d06a0a1d1 Mon Sep 17 00:00:00 2001
+From: cerXXXX <polyakovia2009@gmail.com>
+Date: Thu, 8 Oct 2026 23:06:55 +0300
+Subject: [PATCH] perf: add --downscale-to-output to render big wallpapers at
+ the screen's resolution
+
+Scenes render into framebuffers the size of their orthographic projection
+and every image layer with effects gets framebuffers the size of its
+texture, so a 3840x2160 scene on a 1920x1080 screen does all its passes at
+four times the pixels the screen can show. Videos are likewise rendered to
+a texture of the video's size before being scaled to the output.
+
+With --downscale-to-output, a wallpaper gets the pixel size of the output
+showing it (the bounding box at the densest screen's pixel ratio for a span
+group) and renders content bigger than it at the output's resolution:
+
+- Scenes: the scene framebuffer, the bloom and shadow atlas framebuffers,
+  each layer's composite framebuffers and its effects' framebuffers are
+  created scaled down; the camera and all geometry stay in scene units, so
+  only the pixel count changes. The scale fills the output for fill,
+  stretch and default scaling and fits inside it for fit. Framebuffers
+  remember their scale, so an image whose texture is a framebuffer (the
+  bloom layer reads _rt_FullFrameBuffer) still gets its size in scene units.
+- Videos: mpv renders into a texture of the scaled size, which it scales
+  the video to itself.
+- Screenshots read the wallpaper framebuffer at its real size instead of
+  the projection's.
+
+Nothing smaller than the output is scaled up, and without the flag nothing
+changes. g_TexelSize stays in scene units, so effects keep their size on
+screen.
+
+Measured on Intel Iris Xe, one 1920x1080 output, 30 fps (render engine time
+from DRM fdinfo): a 3840x2160 scene with two full-screen effects and bloom
+goes from 46.7% to 19.4%, a 3840x2160 H.264 video from 9.5% to 5.3%.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../Application/ApplicationContext.cpp        |  8 ++++
+ .../Application/ApplicationContext.h          |  3 ++
+ .../Application/WallpaperApplication.cpp      | 39 ++++++++++++++---
+ .../Application/WallpaperApplication.h        |  4 ++
+ src/WallpaperEngine/Render/CFBO.cpp           |  8 +++-
+ src/WallpaperEngine/Render/CFBO.h             |  7 ++-
+ src/WallpaperEngine/Render/CWallpaper.cpp     | 43 ++++++++++++++-----
+ src/WallpaperEngine/Render/CWallpaper.h       | 31 ++++++++++++-
+ src/WallpaperEngine/Render/FBOProvider.cpp    | 10 +++--
+ src/WallpaperEngine/Render/FBOProvider.h      |  4 +-
+ src/WallpaperEngine/Render/Objects/CImage.cpp | 23 ++++++++--
+ .../Render/Wallpapers/CScene.cpp              | 26 ++++++++---
+ .../Render/Wallpapers/CScene.h                |  3 +-
+ .../Render/Wallpapers/CVideo.cpp              |  7 ++-
+ .../Render/Wallpapers/CVideo.h                |  3 +-
+ .../VideoPlayback/MPV/GLPlayer.cpp            | 24 +++++++++++
+ .../VideoPlayback/MPV/GLPlayer.h              |  7 +++
+ 17 files changed, 209 insertions(+), 41 deletions(-)
+
+diff --git a/src/WallpaperEngine/Application/ApplicationContext.cpp b/src/WallpaperEngine/Application/ApplicationContext.cpp
+index 9ba11c4..66a957c 100644
+--- a/src/WallpaperEngine/Application/ApplicationContext.cpp
++++ b/src/WallpaperEngine/Application/ApplicationContext.cpp
+@@ -493,6 +493,14 @@ void ApplicationContext::loadSettingsFromArgv () {
+ 	.default_value (30)
+ 	.store_into (this->settings.render.maximumFPS);
+ 
++    performanceGroup.add_argument ("--downscale-to-output")
++	.help (
++	    "Renders scenes and videos bigger than the screen at the screen's resolution instead of their own, "
++	    "skipping detail the screen can't show"
++	)
++	.flag ()
++	.store_into (this->settings.render.downscaleToOutput);
++
+     performanceGroup.add_argument ("--no-fullscreen-pause")
+ 	.help ("Prevents the background pausing when an app is fullscreen")
+ 	.flag ()
+diff --git a/src/WallpaperEngine/Application/ApplicationContext.h b/src/WallpaperEngine/Application/ApplicationContext.h
+index 55650d9..de64fb7 100644
+--- a/src/WallpaperEngine/Application/ApplicationContext.h
++++ b/src/WallpaperEngine/Application/ApplicationContext.h
+@@ -125,6 +125,8 @@ public:
+ 	     * Example: "firefox" will match "org.mozilla.firefox".
+ 	     */
+ 	    std::vector<std::string> fullscreenPauseIgnoreAppIds;
++	    /** Render scenes and videos bigger than the output at the output's resolution instead of their own */
++	    bool downscaleToOutput;
+ 	    /** Render debugging switches for scene compatibility work */
+ 	    struct {
+ 		bool baseOnly;
+@@ -203,6 +205,7 @@ public:
+             .pauseOnFullscreen = true,
+             .pauseOnFullscreenOnlyWhenActive = false,
+             .fullscreenPauseIgnoreAppIds = {},
++            .downscaleToOutput = false,
+             .debug = {
+                 .baseOnly = false,
+                 .noSolidFinal = false,
+diff --git a/src/WallpaperEngine/Application/WallpaperApplication.cpp b/src/WallpaperEngine/Application/WallpaperApplication.cpp
+index b4b6356..88fa1fd 100644
+--- a/src/WallpaperEngine/Application/WallpaperApplication.cpp
++++ b/src/WallpaperEngine/Application/WallpaperApplication.cpp
+@@ -451,7 +451,7 @@ void WallpaperApplication::advancePlaylist (
+ 		screen,
+ 		WallpaperEngine::Render::CWallpaper::fromWallpaper (
+ 		    *this->m_backgrounds[screen]->wallpaper, *this->m_renderContext, *this->m_audioContext,
+-		    this->m_browserContext.get (), scaling, clamp
++		    this->m_browserContext.get (), scaling, clamp, this->getOutputSize (screen)
+ 		)
+ 	    );
+ 	}
+@@ -602,8 +602,10 @@ void WallpaperApplication::takeScreenshot (const std::filesystem::path& filename
+ 	glFinish ();
+ 
+ 	// make room for storing the pixel of this viewport
+-	const int readWidth = wallpaper->getWidth ();
+-	const int readHeight = wallpaper->getHeight ();
++	// the FBO can be smaller than the wallpaper with --downscale-to-output
++	const glm::vec2 readSize = wallpaper->getRenderSize ({ wallpaper->getWidth (), wallpaper->getHeight () });
++	const int readWidth = static_cast<int> (readSize.x);
++	const int readHeight = static_cast<int> (readSize.y);
+ 	const auto bufferSize = readWidth * readHeight * 3;
+ 	auto* buffer = new uint8_t[bufferSize];
+ 
+@@ -763,7 +765,8 @@ void WallpaperApplication::prepareOutputs () {
+ 	m_renderContext->setWallpaper (
+ 	    background,
+ 	    WallpaperEngine::Render::CWallpaper::fromWallpaper (
+-		*info->wallpaper, *m_renderContext, *m_audioContext, m_browserContext.get (), scaling, clamp
++		*info->wallpaper, *m_renderContext, *m_audioContext, m_browserContext.get (), scaling, clamp,
++		this->getOutputSize (background)
+ 	    )
+ 	);
+     }
+@@ -783,6 +786,8 @@ void WallpaperApplication::prepareOutputs () {
+ 	// Compute the bounding box of all viewports in this span group
+ 	const auto& viewports = m_renderContext->getOutput ().getViewports ();
+ 	int minX = INT_MAX, minY = INT_MAX, maxX = INT_MIN, maxY = INT_MIN;
++	// physical pixels per logical pixel of the densest screen in the group
++	float maxPixelRatio = 1.0f;
+ 	bool anyFound = false;
+ 
+ 	for (const auto& screenName : spanGroup.screens) {
+@@ -805,6 +810,10 @@ void WallpaperApplication::prepareOutputs () {
+ 	    minY = std::min (minY, y);
+ 	    maxX = std::max (maxX, x + w);
+ 	    maxY = std::max (maxY, y + h);
++
++	    if (w > 0) {
++		maxPixelRatio = std::max (maxPixelRatio, static_cast<float> (vp->viewport.z) / static_cast<float> (w));
++	    }
+ 	}
+ 
+ 	if (!anyFound) {
+@@ -819,10 +828,15 @@ void WallpaperApplication::prepareOutputs () {
+ 	WallpaperEngine::Render::CWallpaper::SpanInfo spanInfo;
+ 	spanInfo.totalBounds = { minX, minY, maxX - minX, maxY - minY };
+ 
++	// the span is drawn as one picture covering the bounding box, at the densest screen's resolution
++	const glm::ivec2 outputSize = this->m_context.settings.render.downscaleToOutput
++	    ? glm::ivec2 (glm::ceil (glm::vec2 (maxX - minX, maxY - minY) * maxPixelRatio))
++	    : glm::ivec2 (0, 0);
++
+ 	// Create one shared wallpaper with the span group's scaling mode
+ 	auto sharedWallpaper = WallpaperEngine::Render::CWallpaper::fromWallpaper (
+ 	    *bgIt->second->wallpaper, *m_renderContext, *m_audioContext, m_browserContext.get (), spanGroup.scaling,
+-	    spanGroup.clamp
++	    spanGroup.clamp, outputSize
+ 	);
+ 
+ 	// Convert to shared_ptr so it can be registered for multiple viewports
+@@ -836,6 +850,21 @@ void WallpaperApplication::prepareOutputs () {
+     }
+ }
+ 
++glm::ivec2 WallpaperApplication::getOutputSize (const std::string& screen) const {
++    if (!this->m_context.settings.render.downscaleToOutput) {
++	return { 0, 0 };
++    }
++
++    const auto& viewports = this->m_renderContext->getOutput ().getViewports ();
++    const auto it = viewports.find (screen);
++
++    if (it == viewports.end ()) {
++	return { 0, 0 };
++    }
++
++    return { it->second->viewport.z, it->second->viewport.w };
++}
++
+ void WallpaperApplication::setupOpenGLDebugging () {
+ #if !NDEBUG
+     glDebugMessageCallback (CustomGLDebugCallback, nullptr);
+diff --git a/src/WallpaperEngine/Application/WallpaperApplication.h b/src/WallpaperEngine/Application/WallpaperApplication.h
+index 79c3155..8d70930 100644
+--- a/src/WallpaperEngine/Application/WallpaperApplication.h
++++ b/src/WallpaperEngine/Application/WallpaperApplication.h
+@@ -164,6 +164,10 @@ private:
+     std::vector<std::size_t> buildPlaylistOrder (const ApplicationContext::PlaylistDefinition& definition);
+     void ensureBrowserForProject (const Project& project);
+     bool makeAnyViewportCurrent () const;
++    /**
++     * @return The size in pixels the given screen's wallpaper is limited to, 0x0 when it's rendered at full size
++     */
++    [[nodiscard]] glm::ivec2 getOutputSize (const std::string& screen) const;
+ 
+     /** The application context that contains the current app settings */
+     ApplicationContext& m_context;
+diff --git a/src/WallpaperEngine/Render/CFBO.cpp b/src/WallpaperEngine/Render/CFBO.cpp
+index d925d8f..514f09c 100644
+--- a/src/WallpaperEngine/Render/CFBO.cpp
++++ b/src/WallpaperEngine/Render/CFBO.cpp
+@@ -5,8 +5,10 @@ using namespace WallpaperEngine::Render;
+ 
+ CFBO::CFBO (
+     std::string name, const TextureFormat format, const uint32_t flags, const float scale, uint32_t realWidth,
+-    uint32_t realHeight, uint32_t textureWidth, uint32_t textureHeight
+-) : m_scale (scale), m_name (std::move (name)), m_format (format), m_flags (flags) {
++    uint32_t realHeight, uint32_t textureWidth, uint32_t textureHeight, const float resolutionScale
++) :
++    m_scale (scale), m_resolutionScale (resolutionScale), m_name (std::move (name)), m_format (format),
++    m_flags (flags) {
+     // create an empty texture that'll be free'd so the FBO is transparent
+     constexpr GLenum drawBuffers[1] = { GL_COLOR_ATTACHMENT0 };
+     // create the main framebuffer
+@@ -89,6 +91,8 @@ const std::string& CFBO::getName () const { return this->m_name; }
+ 
+ const float& CFBO::getScale () const { return this->m_scale; }
+ 
++float CFBO::getResolutionScale () const { return this->m_resolutionScale; }
++
+ TextureFormat CFBO::getFormat () const { return this->m_format; }
+ 
+ uint32_t CFBO::getFlags () const { return this->m_flags; }
+diff --git a/src/WallpaperEngine/Render/CFBO.h b/src/WallpaperEngine/Render/CFBO.h
+index 8805804..a92dc4c 100644
+--- a/src/WallpaperEngine/Render/CFBO.h
++++ b/src/WallpaperEngine/Render/CFBO.h
+@@ -11,12 +11,16 @@ class CFBO final : public TextureProvider {
+ public:
+     CFBO (
+ 	std::string name, const TextureFormat format, const uint32_t flags, const float scale, uint32_t realWidth,
+-	uint32_t realHeight, uint32_t textureWidth, uint32_t textureHeight
++	uint32_t realHeight, uint32_t textureWidth, uint32_t textureHeight, float resolutionScale = 1.0f
+     );
+     ~CFBO () override;
+ 
+     [[nodiscard]] const std::string& getName () const;
+     [[nodiscard]] const float& getScale () const;
++    /**
++     * @return How much smaller than its size in scene units this framebuffer was created (1 = same size)
++     */
++    [[nodiscard]] float getResolutionScale () const;
+     [[nodiscard]] TextureFormat getFormat () const override;
+     [[nodiscard]] uint32_t getFlags () const override;
+     [[nodiscard]] GLuint getFramebuffer () const;
+@@ -45,6 +49,7 @@ private:
+     GLuint m_texture = GL_NONE;
+     glm::vec4 m_resolution = {};
+     float m_scale = 0;
++    float m_resolutionScale = 1.0f;
+     std::string m_name = "";
+     TextureFormat m_format = TextureFormat_UNKNOWN;
+     uint32_t m_flags = TextureFlags_NoFlags;
+diff --git a/src/WallpaperEngine/Render/CWallpaper.cpp b/src/WallpaperEngine/Render/CWallpaper.cpp
+index 28d9575..c0672fe 100644
+--- a/src/WallpaperEngine/Render/CWallpaper.cpp
++++ b/src/WallpaperEngine/Render/CWallpaper.cpp
+@@ -11,10 +11,10 @@ using namespace WallpaperEngine::Render;
+ 
+ CWallpaper::CWallpaper (
+     const Wallpaper& wallpaperData, RenderContext& context, AudioContext& audioContext,
+-    const WallpaperState::TextureUVsScaling& scalingMode, const uint32_t& clampMode
++    const WallpaperState::TextureUVsScaling& scalingMode, const uint32_t& clampMode, const glm::ivec2& outputSize
+ ) :
+     ContextAware (context), FBOProvider (nullptr), m_wallpaperData (wallpaperData), m_audioContext (audioContext),
+-    m_state (scalingMode, clampMode) {
++    m_state (scalingMode, clampMode), m_outputSize (outputSize) {
+     // generate the VAO to stop opengl from complaining
+     glGenVertexArrays (1, &this->m_vaoBuffer);
+     glBindVertexArray (this->m_vaoBuffer);
+@@ -311,15 +311,38 @@ void CWallpaper::setPause (bool newState) { }
+ 
+ double CWallpaper::getContentFrameRate () const { return 0.0; }
+ 
++float CWallpaper::getResolutionScale () const { return this->m_resolutionScale; }
++
++glm::vec2 CWallpaper::getRenderSize (const glm::vec2& size) const {
++    if (this->m_resolutionScale == 1.0f) {
++	return size;
++    }
++
++    return glm::max (glm::round (size * this->m_resolutionScale), glm::vec2 (1.0f));
++}
++
++float CWallpaper::getOutputResolutionScale (const glm::vec2& contentSize) const {
++    if (this->m_outputSize.x <= 0 || this->m_outputSize.y <= 0 || contentSize.x <= 0.0f || contentSize.y <= 0.0f) {
++	return 1.0f;
++    }
++
++    const float scaleX = static_cast<float> (this->m_outputSize.x) / contentSize.x;
++    const float scaleY = static_cast<float> (this->m_outputSize.y) / contentSize.y;
++    // fit shows the whole content inside the output, the other modes crop or stretch it to cover the output
++    const float scale = this->m_state.getTextureUVsScaling () == WallpaperState::TextureUVsScaling::ZoomFitUVs
++	? std::min (scaleX, scaleY)
++	: std::max (scaleX, scaleY);
++
++    return std::min (scale, 1.0f);
++}
++
+ void CWallpaper::setupFramebuffers () {
+-    const uint32_t width = this->getWidth ();
+-    const uint32_t height = this->getHeight ();
++    const glm::vec2 size = this->getRenderSize ({ this->getWidth (), this->getHeight () });
+     const uint32_t clamp = this->m_state.getClampingMode ();
+ 
+     // create framebuffer for the scene
+-    this->m_sceneFBO = this->create (
+-	"_rt_FullFrameBuffer", TextureFormat_ARGB8888, clamp, 1.0, { width, height }, { width, height }
+-    );
++    this->m_sceneFBO
++	= this->create ("_rt_FullFrameBuffer", TextureFormat_ARGB8888, clamp, 1.0, size, size, this->m_resolutionScale);
+ 
+     this->alias ("_rt_MipMappedFrameBuffer", "_rt_FullFrameBuffer");
+ }
+@@ -343,17 +366,17 @@ std::shared_ptr<const CFBO> CWallpaper::getFBO () const { return this->m_sceneFB
+ std::unique_ptr<CWallpaper> CWallpaper::fromWallpaper (
+     const Wallpaper& wallpaper, RenderContext& context, AudioContext& audioContext,
+     WebBrowser::WebBrowserContext* browserContext, const WallpaperState::TextureUVsScaling& scalingMode,
+-    const uint32_t& clampMode
++    const uint32_t& clampMode, const glm::ivec2& outputSize
+ ) {
+     if (wallpaper.is<Scene> ()) {
+ 	return std::make_unique<WallpaperEngine::Render::Wallpapers::CScene> (
+-	    wallpaper, context, audioContext, scalingMode, clampMode
++	    wallpaper, context, audioContext, scalingMode, clampMode, outputSize
+ 	);
+     }
+ 
+     if (wallpaper.is<Video> ()) {
+ 	return std::make_unique<WallpaperEngine::Render::Wallpapers::CVideo> (
+-	    wallpaper, context, audioContext, scalingMode, clampMode
++	    wallpaper, context, audioContext, scalingMode, clampMode, outputSize
+ 	);
+     }
+ 
+diff --git a/src/WallpaperEngine/Render/CWallpaper.h b/src/WallpaperEngine/Render/CWallpaper.h
+index 67a798b..1c5380f 100644
+--- a/src/WallpaperEngine/Render/CWallpaper.h
++++ b/src/WallpaperEngine/Render/CWallpaper.h
+@@ -132,6 +132,18 @@ public:
+      */
+     [[nodiscard]] virtual double getContentFrameRate () const;
+ 
++    /**
++     * @return The factor framebuffers are scaled by so they're no bigger than the output needs, 1 for full size
++     */
++    [[nodiscard]] float getResolutionScale () const;
++
++    /**
++     * @param size A size in scene units
++     *
++     * @return The size in pixels to render something of the given size at
++     */
++    [[nodiscard]] glm::vec2 getRenderSize (const glm::vec2& size) const;
++
+     /**
+      * Creates a new instance of CWallpaper based on the information provided by the read backgrounds
+      *
+@@ -139,21 +151,31 @@ public:
+      * @param context
+      * @param audioContext
+      * @param scalingMode
++     * @param outputSize Size in pixels of the output(s) showing the wallpaper, content bigger than it is rendered at
++     * the output's resolution; 0x0 renders everything at its own resolution
+      *
+      * @return
+      */
+     static std::unique_ptr<CWallpaper> fromWallpaper (
+ 	const Wallpaper& wallpaper, RenderContext& context, AudioContext& audioContext,
+ 	WebBrowser::WebBrowserContext* browserContext, const WallpaperState::TextureUVsScaling& scalingMode,
+-	const uint32_t& clampMode
++	const uint32_t& clampMode, const glm::ivec2& outputSize = { 0, 0 }
+     );
+ 
+ protected:
+     CWallpaper (
+ 	const Wallpaper& wallpaperData, RenderContext& context, AudioContext& audioContext,
+-	const WallpaperState::TextureUVsScaling& scalingMode, const uint32_t& clampMode
++	const WallpaperState::TextureUVsScaling& scalingMode, const uint32_t& clampMode,
++	const glm::ivec2& outputSize = { 0, 0 }
+     );
+ 
++    /**
++     * @param contentSize The size the content would be rendered at
++     *
++     * @return The factor to render content of that size at so it's no bigger than the output needs, at most 1
++     */
++    [[nodiscard]] float getOutputResolutionScale (const glm::vec2& contentSize) const;
++
+     /**
+      * Renders a frame of the wallpaper
+      */
+@@ -173,6 +195,9 @@ protected:
+ 
+     GLuint m_vaoBuffer = GL_NONE;
+ 
++    /** Factor the wallpaper's framebuffers are scaled by, see getResolutionScale () */
++    float m_resolutionScale = 1.0f;
++
+ private:
+     /** The texture used for the scene output */
+     GLuint m_texCoordBuffer = GL_NONE;
+@@ -192,6 +217,8 @@ private:
+     AudioContext& m_audioContext;
+     /** Current Wallpaper state */
+     WallpaperState m_state;
++    /** Size in pixels of the output(s) showing this wallpaper, 0x0 when content is rendered at its own size */
++    glm::ivec2 m_outputSize;
+     /** Span info for multi-monitor spanning (optional) */
+     std::optional<SpanInfo> m_spanInfo = std::nullopt;
+     /** Frame counter to avoid redundant renderFrame calls when shared across viewports */
+diff --git a/src/WallpaperEngine/Render/FBOProvider.cpp b/src/WallpaperEngine/Render/FBOProvider.cpp
+index 556a6eb..da6c5de 100644
+--- a/src/WallpaperEngine/Render/FBOProvider.cpp
++++ b/src/WallpaperEngine/Render/FBOProvider.cpp
+@@ -6,21 +6,23 @@ using namespace WallpaperEngine::Data::Model;
+ 
+ FBOProvider::FBOProvider (const FBOProvider* parent) : m_parent (parent) { }
+ 
+-std::shared_ptr<CFBO> FBOProvider::create (const FBO& base, uint32_t flags, const glm::vec2 size) {
++std::shared_ptr<CFBO>
++FBOProvider::create (const FBO& base, uint32_t flags, const glm::vec2 size, const float resolutionScale) {
+     return this->m_fbos[base.name] = std::make_shared<CFBO> (
+ 	       base.name,
+ 	       // TODO: PROPERLY DETERMINE FBO FORMAT BASED ON THE STRING
+ 	       TextureFormat_ARGB8888, flags, base.scale, size.x / base.scale, size.y / base.scale, size.x / base.scale,
+-	       size.y / base.scale
++	       size.y / base.scale, resolutionScale
+ 	   );
+ }
+ 
+ std::shared_ptr<CFBO> FBOProvider::create (
+     const std::string& name, TextureFormat format, uint32_t flags, float scale, glm::vec2 realSize,
+-    glm::vec2 textureSize
++    glm::vec2 textureSize, const float resolutionScale
+ ) {
+     return this->m_fbos[name] = std::make_shared<CFBO> (
+-	       name, TextureFormat_ARGB8888, flags, scale, realSize.x, realSize.y, textureSize.x, textureSize.y
++	       name, TextureFormat_ARGB8888, flags, scale, realSize.x, realSize.y, textureSize.x, textureSize.y,
++	       resolutionScale
+ 	   );
+ }
+ 
+diff --git a/src/WallpaperEngine/Render/FBOProvider.h b/src/WallpaperEngine/Render/FBOProvider.h
+index 29dd2fd..f0c7122 100644
+--- a/src/WallpaperEngine/Render/FBOProvider.h
++++ b/src/WallpaperEngine/Render/FBOProvider.h
+@@ -12,10 +12,10 @@ class FBOProvider {
+ public:
+     explicit FBOProvider (const FBOProvider* parent);
+ 
+-    std::shared_ptr<CFBO> create (const FBO& base, uint32_t flags, glm::vec2 size);
++    std::shared_ptr<CFBO> create (const FBO& base, uint32_t flags, glm::vec2 size, float resolutionScale = 1.0f);
+     std::shared_ptr<CFBO> create (
+ 	const std::string& name, TextureFormat format, uint32_t flags, float scale, glm::vec2 realSize,
+-	glm::vec2 textureSize
++	glm::vec2 textureSize, float resolutionScale = 1.0f
+     );
+     std::shared_ptr<CFBO> alias (const std::string& newName, const std::string& original);
+     [[nodiscard]] std::shared_ptr<CFBO> find (const std::string& name) const;
+diff --git a/src/WallpaperEngine/Render/Objects/CImage.cpp b/src/WallpaperEngine/Render/Objects/CImage.cpp
+index be0baca..b9d405c 100644
+--- a/src/WallpaperEngine/Render/Objects/CImage.cpp
++++ b/src/WallpaperEngine/Render/Objects/CImage.cpp
+@@ -268,11 +268,16 @@ CImage::CImage (Wallpapers::CScene& scene, const Image& image) :
+     nameA << "_rt_imageLayerComposite_" << this->getImage ().id << "_a";
+     nameB << "_rt_imageLayerComposite_" << this->getImage ().id << "_b";
+ 
++    // the layer only needs as many pixels as it takes on the output
++    const glm::vec2 renderSize = scene.getRenderSize (size);
++
+     this->m_currentMainFBO = this->m_mainFBO = scene.create (
+-	nameA.str (), TextureFormat_ARGB8888, this->m_texture->getFlags (), 1, { size.x, size.y }, { size.x, size.y }
++	nameA.str (), TextureFormat_ARGB8888, this->m_texture->getFlags (), 1, renderSize, renderSize,
++	scene.getResolutionScale ()
+     );
+     this->m_currentSubFBO = this->m_subFBO = scene.create (
+-	nameB.str (), TextureFormat_ARGB8888, this->m_texture->getFlags (), 1, { size.x, size.y }, { size.x, size.y }
++	nameB.str (), TextureFormat_ARGB8888, this->m_texture->getFlags (), 1, renderSize, renderSize,
++	scene.getResolutionScale ()
+     );
+ 
+     // build a list of vertices, these might need some change later (or maybe invert the camera)
+@@ -650,7 +655,10 @@ void CImage::setup () {
+ 
+ 	    // create all the fbos for this effect
+ 	    for (const auto& fbo : cur->effect->fbos) {
+-		fboProvider->create (*fbo, this->m_texture->getFlags (), this->getSize ());
++		fboProvider->create (
++		    *fbo, this->m_texture->getFlags (), this->getScene ().getRenderSize (this->getSize ()),
++		    this->getScene ().getResolutionScale ()
++		);
+ 	    }
+ 
+ 	    // TODO: MAKE USE OF ZIP OPERATOR IN BOOST? WAY OVERKILL JUST FOR THIS...
+@@ -1134,7 +1142,14 @@ glm::vec2 CImage::getSize () const {
+ 	return this->getImage ().size;
+     }
+ 
+-    return { this->m_texture->getRealWidth (), this->m_texture->getRealHeight () };
++    const glm::vec2 size = { this->m_texture->getRealWidth (), this->m_texture->getRealHeight () };
++
++    // framebuffers can be rendered smaller than the scene area they cover
++    if (const auto fbo = std::dynamic_pointer_cast<const CFBO> (this->m_texture); fbo != nullptr) {
++	return size / fbo->getResolutionScale ();
++    }
++
++    return size;
+ }
+ 
+ GLuint CImage::getSceneSpacePosition () const { return this->m_sceneSpacePosition; }
+diff --git a/src/WallpaperEngine/Render/Wallpapers/CScene.cpp b/src/WallpaperEngine/Render/Wallpapers/CScene.cpp
+index 4933440..1d3a130 100644
+--- a/src/WallpaperEngine/Render/Wallpapers/CScene.cpp
++++ b/src/WallpaperEngine/Render/Wallpapers/CScene.cpp
+@@ -24,8 +24,8 @@ using namespace WallpaperEngine::Render::Wallpapers;
+ 
+ CScene::CScene (
+     const Wallpaper& wallpaper, RenderContext& context, AudioContext& audioContext,
+-    const WallpaperState::TextureUVsScaling& scalingMode, const uint32_t& clampMode
+-) : CWallpaper (wallpaper, context, audioContext, scalingMode, clampMode) {
++    const WallpaperState::TextureUVsScaling& scalingMode, const uint32_t& clampMode, const glm::ivec2& outputSize
++) : CWallpaper (wallpaper, context, audioContext, scalingMode, clampMode, outputSize) {
+     // caller should check this, if not a std::bad_cast is good to throw
+     auto scene = wallpaper.as<Scene> ();
+ 
+@@ -73,15 +73,26 @@ CScene::CScene (
+     // TODO: CONVERSION
+     this->m_camera->setOrthogonalProjection (width, height);
+ 
++    // the camera keeps working in scene units, only the framebuffers it renders to get smaller
++    this->m_resolutionScale
++	= this->getOutputResolutionScale ({ this->m_camera->getWidth (), this->m_camera->getHeight () });
++
+     // setup framebuffers here as they're required for the scene setup
+     this->setupFramebuffers ();
+ 
+-    const uint32_t sceneWidth = this->m_camera->getWidth ();
+-    const uint32_t sceneHeight = this->m_camera->getHeight ();
++    const uint32_t sceneWidth = this->m_sceneFBO->getRealWidth ();
++    const uint32_t sceneHeight = this->m_sceneFBO->getRealHeight ();
++
++    if (this->m_resolutionScale < 1.0f) {
++	sLog.out (
++	    "Rendering ", this->m_camera->getWidth (), "x", this->m_camera->getHeight (), " scene at ", sceneWidth, "x",
++	    sceneHeight
++	);
++    }
+ 
+     this->_rt_shadowAtlas = this->create (
+ 	"_rt_shadowAtlas", TextureFormat_ARGB8888, TextureFlags_ClampUVs, 1.0, { sceneWidth, sceneHeight },
+-	{ sceneWidth, sceneHeight }
++	{ sceneWidth, sceneHeight }, this->m_resolutionScale
+     );
+     this->alias ("_alias_lightCookie", "_rt_shadowAtlas");
+ 
+@@ -121,8 +132,9 @@ CScene::CScene (
+     // (it renders directly to the screen, whereas here we never do that from a scene)
+     //
+ 
+-    const auto bloomOrigin = glm::vec3 { sceneWidth / 2, sceneHeight / 2, 0.0f };
+-    const auto bloomSize = glm::vec2 { sceneWidth, sceneHeight };
++    // the bloom image covers the whole scene, so its geometry is in scene units, not framebuffer pixels
++    const auto bloomOrigin = glm::vec3 { this->m_camera->getWidth () / 2, this->m_camera->getHeight () / 2, 0.0f };
++    const auto bloomSize = glm::vec2 { this->m_camera->getWidth (), this->m_camera->getHeight () };
+ 
+     const JSON bloom
+ 	= { { "image", "models/wpenginelinux.json" },
+diff --git a/src/WallpaperEngine/Render/Wallpapers/CScene.h b/src/WallpaperEngine/Render/Wallpapers/CScene.h
+index 9e12f3f..6173407 100644
+--- a/src/WallpaperEngine/Render/Wallpapers/CScene.h
++++ b/src/WallpaperEngine/Render/Wallpapers/CScene.h
+@@ -17,7 +17,8 @@ class CScene final : public CWallpaper {
+ public:
+     CScene (
+ 	const Wallpaper& wallpaper, RenderContext& context, AudioContext& audioContext,
+-	const WallpaperState::TextureUVsScaling& scalingMode, const uint32_t& clampMode
++	const WallpaperState::TextureUVsScaling& scalingMode, const uint32_t& clampMode,
++	const glm::ivec2& outputSize = { 0, 0 }
+     );
+ 
+     ~CScene () override;
+diff --git a/src/WallpaperEngine/Render/Wallpapers/CVideo.cpp b/src/WallpaperEngine/Render/Wallpapers/CVideo.cpp
+index 27c202c..05fcc33 100644
+--- a/src/WallpaperEngine/Render/Wallpapers/CVideo.cpp
++++ b/src/WallpaperEngine/Render/Wallpapers/CVideo.cpp
+@@ -11,8 +11,8 @@ using namespace WallpaperEngine::VideoPlayback::MPV;
+ 
+ CVideo::CVideo (
+     const Wallpaper& wallpaper, RenderContext& context, AudioContext& audioContext,
+-    const WallpaperState::TextureUVsScaling& scalingMode, const uint32_t& clampMode
+-) : CWallpaper (wallpaper, context, audioContext, scalingMode, clampMode) {
++    const WallpaperState::TextureUVsScaling& scalingMode, const uint32_t& clampMode, const glm::ivec2& outputSize
++) : CWallpaper (wallpaper, context, audioContext, scalingMode, clampMode, outputSize) {
+     // setup framebuffers
+     this->setupFramebuffers ();
+ 
+@@ -25,6 +25,9 @@ CVideo::CVideo (
+ 	this->getContext (), this->CWallpaper::getWallpaperTexture (), videopath, 64, 64,
+ 	this->CWallpaper::getWallpaperFramebuffer ()
+     );
++    this->m_player->setResolutionScaler ([this] (const glm::vec2& size) {
++	return this->getOutputResolutionScale (size);
++    });
+     // --silent disables audio (audio.enabled = false) and must mute video wallpapers too;
+     // a volume of 0 mutes the mpv backend (matching what --volume 0 already does).
+     const auto& audioSettings = this->getContext ().getApp ().getContext ().settings.audio;
+diff --git a/src/WallpaperEngine/Render/Wallpapers/CVideo.h b/src/WallpaperEngine/Render/Wallpapers/CVideo.h
+index dd075e1..7a9889f 100644
+--- a/src/WallpaperEngine/Render/Wallpapers/CVideo.h
++++ b/src/WallpaperEngine/Render/Wallpapers/CVideo.h
+@@ -11,7 +11,8 @@ class CVideo final : public CWallpaper {
+ public:
+     CVideo (
+ 	const Wallpaper& wallpaper, RenderContext& context, AudioContext& audioContext,
+-	const WallpaperState::TextureUVsScaling& scalingMode, const uint32_t& clampMode
++	const WallpaperState::TextureUVsScaling& scalingMode, const uint32_t& clampMode,
++	const glm::ivec2& outputSize = { 0, 0 }
+     );
+ 
+     ~CVideo () override;
+diff --git a/src/WallpaperEngine/VideoPlayback/MPV/GLPlayer.cpp b/src/WallpaperEngine/VideoPlayback/MPV/GLPlayer.cpp
+index 4c4a846..6bf0c55 100644
+--- a/src/WallpaperEngine/VideoPlayback/MPV/GLPlayer.cpp
++++ b/src/WallpaperEngine/VideoPlayback/MPV/GLPlayer.cpp
+@@ -5,6 +5,8 @@
+ #include <mpv/render_gl.h>
+ #include <mpv/stream_cb.h>
+ 
++#include <algorithm>
++#include <cmath>
+ #include <vector>
+ 
+ using namespace WallpaperEngine::VideoPlayback::MPV;
+@@ -160,6 +162,24 @@ void GLPlayer::render () const {
+ 	    continue;
+ 	}
+ 
++	// mpv scales the video to the framebuffer's size, so a smaller one is all it takes to render it smaller
++	const float scale = this->m_resolutionScaler
++	    ? this->m_resolutionScaler ({ static_cast<float> (width), static_cast<float> (height) })
++	    : 1.0f;
++
++	if (scale < 1.0f) {
++	    const int64_t scaledWidth = std::max<int64_t> (1, std::lround (width * scale));
++	    const int64_t scaledHeight = std::max<int64_t> (1, std::lround (height * scale));
++
++	    // mpv reconfigures on every loop, only log when the size changes
++	    if (scaledWidth != this->m_width || scaledHeight != this->m_height) {
++		sLog.out ("Rendering ", width, "x", height, " video at ", scaledWidth, "x", scaledHeight);
++	    }
++
++	    width = scaledWidth;
++	    height = scaledHeight;
++	}
++
+ 	this->m_width = width;
+ 	this->m_height = height;
+ 	// reconfigure the texture
+@@ -187,6 +207,10 @@ void GLPlayer::render () const {
+     mpv_render_context_render (this->m_renderContext, params);
+ }
+ 
++void GLPlayer::setResolutionScaler (std::function<float (const glm::vec2&)> scaler) {
++    this->m_resolutionScaler = std::move (scaler);
++}
++
+ int GLPlayer::getWidth () const { return this->m_width; }
+ int GLPlayer::getHeight () const { return this->m_height; }
+ double GLPlayer::getFrameRate () const { return this->m_frameRate; }
+diff --git a/src/WallpaperEngine/VideoPlayback/MPV/GLPlayer.h b/src/WallpaperEngine/VideoPlayback/MPV/GLPlayer.h
+index 2973f64..66a0bfc 100644
+--- a/src/WallpaperEngine/VideoPlayback/MPV/GLPlayer.h
++++ b/src/WallpaperEngine/VideoPlayback/MPV/GLPlayer.h
+@@ -4,6 +4,8 @@
+ #include "WallpaperEngine/Render/RenderContext.h"
+ 
+ #include <GL/glew.h>
++#include <functional>
++#include <glm/vec2.hpp>
+ #include <mpv/client.h>
+ #include <mpv/render.h>
+ #include <string>
+@@ -45,6 +47,10 @@ public:
+     void setVolume (double volume);
+     void setPaused ();
+     void clearPaused ();
++    /**
++     * @param scaler Returns the factor to render a video of the given size at, the video plays at full size without it
++     */
++    void setResolutionScaler (std::function<float (const glm::vec2&)> scaler);
+ 
+     void render () const;
+ 
+@@ -70,6 +76,7 @@ protected:
+     mutable int64_t m_width;
+     mutable int64_t m_height;
+     mutable double m_frameRate = 0.0;
++    std::function<float (const glm::vec2&)> m_resolutionScaler;
+     mpv_handle* m_handle = nullptr;
+     mpv_render_context* m_renderContext = nullptr;
+     double m_volume = 0.0f;
+-- 
+2.55.0
+
