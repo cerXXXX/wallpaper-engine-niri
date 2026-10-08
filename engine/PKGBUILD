@@ -4,8 +4,8 @@ pkgname=linux-wallpaperengine-git
 _pkgname=linux-wallpaperengine
 _commit=b016d7d1fdcf4e5fd2f9c9fa420a8aaa07fee02d
 pkgver=r627.b016d7d1
-pkgrel=1
-pkgdesc="use steam's wallpaperengine on linux (patched: zero-copy VA-API, video frame pacing)"
+pkgrel=2
+pkgdesc="use steam's wallpaperengine on linux (patched: zero-copy VA-API, video frame pacing, --downscale-to-output)"
 arch=('x86_64')
 url="https://github.com/Almamu/linux-wallpaperengine"
 license=('GPL-3.0-only')
@@ -15,11 +15,13 @@ provides=("linux-wallpaperengine")
 source=("${pkgname}::git+https://github.com/Almamu/linux-wallpaperengine.git#commit=${_commit}"
         "0001-perf-pass-the-Wayland-display-to-mpv-so-VA-API-decod.patch"
         "0002-fix-don-t-let-mpv-sleep-inside-the-render-loop.patch"
-        "0003-perf-render-video-wallpapers-at-the-video-s-frame-ra.patch")
+        "0003-perf-render-video-wallpapers-at-the-video-s-frame-ra.patch"
+        "0004-perf-add-downscale-to-output-to-render-big-wallpaper.patch")
 sha256sums=('faaa2b137b5fb61769ffb0687ae87bb45294556904e96e76b8a46b16f0c522a6'
             '13f211c88024a1f509b0e4b9ab8470b9b836e8657dec644623cff2ba5b481aeb'
             '6764e27aedc9a98bd2db74d6184863bb2fab167c159ae0ee0940225fb50a819c'
-            'fc023c969d02047a7538d7dda1f5ca78e6d961ca8d5ac4a240cf462734d7197c')
+            'fc023c969d02047a7538d7dda1f5ca78e6d961ca8d5ac4a240cf462734d7197c'
+            'f45f0a613d2e6060f7cf0752186d5af2d47356eefd8834c6181af6a6ddf17fd9')
 
 pkgver() {
     cd "$pkgname"
