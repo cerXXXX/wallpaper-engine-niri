@@ -1,4 +1,4 @@
-From 98ac7e3b29cbe35873bafb62aaa788c102bfcc96 Mon Sep 17 00:00:00 2001
+From 14bf1b0aedb3bc7459329dd01e9652c425241421 Mon Sep 17 00:00:00 2001
 From: cerXXXX <84661580+cerXXXX@users.noreply.github.com>
 Date: Fri, 9 Oct 2026 18:55:31 +0300
 Subject: [PATCH] feat: --eco holds the wallpaper still and shows a frame only
@@ -31,7 +31,7 @@ Claude-Session: https://claude.ai/code/session_01TTuB8NJnTLq87k77DhTeWu
  CMakeLists.txt                                |   4 +
  .../Application/ApplicationContext.cpp        |  32 +++++
  .../Application/ApplicationContext.h          |  16 +++
- .../Application/ControlChannel.cpp            |  47 +++++++
+ .../Application/ControlChannel.cpp            |  59 ++++++++
  .../Application/ControlChannel.h              |  30 ++++
  .../Application/WallpaperApplication.cpp      | 131 +++++++++++++++++-
  .../Application/WallpaperApplication.h        |  37 +++++
@@ -58,7 +58,7 @@ Claude-Session: https://claude.ai/code/session_01TTuB8NJnTLq87k77DhTeWu
  .../Render/Wallpapers/CVideo.h                |   8 +-
  .../Testing/Render/TestingOpenGLDriver.cpp    |   6 +-
  .../Testing/Render/TestingOpenGLDriver.h      |   2 +-
- 30 files changed, 856 insertions(+), 60 deletions(-)
+ 30 files changed, 868 insertions(+), 60 deletions(-)
  create mode 100644 src/WallpaperEngine/Application/ControlChannel.cpp
  create mode 100644 src/WallpaperEngine/Application/ControlChannel.h
  create mode 100644 src/WallpaperEngine/Audio/Drivers/Detectors/GainRamp.h
@@ -193,13 +193,12 @@ index a0f3fda2..2c2933d2 100644
      [[nodiscard]] char** getArgv () const;
 diff --git a/src/WallpaperEngine/Application/ControlChannel.cpp b/src/WallpaperEngine/Application/ControlChannel.cpp
 new file mode 100644
-index 00000000..87192bb9
+index 00000000..351380ed
 --- /dev/null
 +++ b/src/WallpaperEngine/Application/ControlChannel.cpp
-@@ -0,0 +1,47 @@
+@@ -0,0 +1,59 @@
 +#include "ControlChannel.h"
 +
-+#include <iostream>
 +#include <mutex>
 +#include <sys/eventfd.h>
 +#include <thread>
@@ -216,18 +215,31 @@ index 00000000..87192bb9
 +ControlChannel::ControlChannel () : m_state (std::make_shared<State> ()) {
 +    this->m_state->eventFd = eventfd (0, EFD_CLOEXEC | EFD_NONBLOCK);
 +
++    // plain read () on the descriptor: std::cin would hold the stdin FILE lock while it waits, and exit () takes
++    // that lock to flush stdio, so the engine would hang on its way out
 +    std::thread ([state = this->m_state] () {
-+	std::string line;
++	std::string pending;
++	char buffer[256];
++	ssize_t length;
 +
-+	while (std::getline (std::cin, line)) {
-+	    {
++	while ((length = read (STDIN_FILENO, buffer, sizeof (buffer))) > 0) {
++	    pending.append (buffer, length);
++
++	    size_t end;
++	    bool received = false;
++
++	    while ((end = pending.find ('\n')) != std::string::npos) {
 +		std::lock_guard lock (state->mutex);
-+		state->commands.push_back (line);
++		state->commands.push_back (pending.substr (0, end));
++		pending.erase (0, end + 1);
++		received = true;
 +	    }
 +
-+	    // a full counter can't happen in practice, and the commands are queued either way
-+	    constexpr uint64_t one = 1;
-+	    [[maybe_unused]] const ssize_t written = write (state->eventFd, &one, sizeof (one));
++	    if (received) {
++		// a full counter can't happen in practice, and the commands are queued either way
++		constexpr uint64_t one = 1;
++		[[maybe_unused]] const ssize_t written = write (state->eventFd, &one, sizeof (one));
++	    }
 +	}
 +    }).detach ();
 +}
