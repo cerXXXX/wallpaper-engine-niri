@@ -10,7 +10,7 @@ My setup for animated [Wallpaper Engine](https://store.steampowered.com/app/4319
 |---|---|
 | [dms-wallpaperengine-dashbridge](https://github.com/cerXXXX/dms-wallpaperengine-dashbridge) | DMS plugin (separate repo): the whole Workshop library in the DMS wallpaper picker, keeps the DMS wallpaper from covering the engine, video wallpapers on the lock screen |
 | [dms-wallpaperengine](https://github.com/cerXXXX/dms-wallpaperengine) | Fork of the Linux Wallpaper Engine DMS plugin (separate repo): **Downscale to Screen** toggle, per-scene render settings, live scenes on the lock screen, stale screenshot timer fix |
-| [`engine/`](engine) | linux-wallpaperengine patches + PKGBUILD: zero-copy VA-API video, correct video frame pacing, video wallpapers rendered at the video's frame rate, `--downscale-to-output`, scene clocks/text and scripts that work, `--stream` (live scenes for the lock screen) |
+| [`engine/`](engine) | linux-wallpaperengine patches + PKGBUILD: zero-copy VA-API video, correct video frame pacing, video wallpapers rendered at the video's frame rate, `--downscale-to-output`, scene clocks/text and scripts that work, `--stream` (live scenes for the lock screen), hidden layers not loaded and layers/effects the user can turn off |
 | [`dms-lock-screen/`](dms-lock-screen) | DMS patch + pacman hook: a video set as the lock screen wallpaper (or the desktop's Wallpaper Engine video) plays behind the clock and password field, the desktop's Wallpaper Engine scene runs live there; a **Blur Wallpaper** toggle for the lock screen background |
 | [`system/`](system) | niri layer rule, `makepkg.conf` without `-debug` packages |
 
@@ -59,7 +59,7 @@ After that wallpapers are switched from the DMS dashboard (click the bar clock â
 
 ## Engine patches
 
-All six apply on upstream `b016d7d` (pinned in the PKGBUILD).
+All seven apply on upstream `b016d7d` (pinned in the PKGBUILD).
 
 - **0001 zero-copy VA-API.** `GLPlayer` created the libmpv render context without `MPV_RENDER_PARAM_WL_DISPLAY`, so mpv
   had no hwdec interop and fell back to `vaapi-copy`, copying every decoded frame through system memory. The Wayland
@@ -106,6 +106,17 @@ All six apply on upstream `b016d7d` (pinned in the PKGBUILD).
   plugin fork uses it for the lock screen: while locked it starts one streaming engine per screen with a scene and
   the patched lock screen plays the stream. About 20% of one core at 1080p30 for the 4K clock scene, only while
   locked with the screens on.
+- **0007 hidden layers aren't loaded.** Properties are applied once at startup, so a layer hidden by one (another
+  language, another clock layout) or by the scene's author, with no script that could show it again, stays hidden for
+  the whole run. Such layers are now left out of the scene together with everything inside them, unless a visible
+  layer depends on them. The multi-language clock scene above is six full copies of itself (one per language), each
+  with five clock layouts: 253 of its 271 objects are skipped and the first frame comes after ~1.0 s instead of
+  ~3.2 s; screenshots of the installed scenes are unchanged. New options, used
+  by the plugin fork's *Layers & Effects* section:
+  - `--list-layers` prints the scene's layers and their effects as JSON, with what the scene hides under the given
+    `--set-property` values;
+  - `--hide-layer ID[,ID...]` hides a layer and everything inside it (not loaded either);
+  - `--disable-effect ID[,ID...]` turns a layer effect off.
 
 Measured on Intel Iris Xe (Tiger Lake), niri, one 1920x1080@60 output; rendered frames counted from
 `wl_surface.attach` with `WAYLAND_DEBUG=1`, CPU as a share of one core:
@@ -140,8 +151,8 @@ no longer applies, `prepare()` stops with the failing hunk.
 - A 24 fps video on a 60 Hz panel without VRR can't be shown evenly (3:2 pulldown).
 - While the session is locked niri draws nothing but the lock surface (ext-session-lock), so the engine's layer can't
   show through. Videos play on the lock screen directly; scenes are rendered by a second engine and streamed
-  (0006), so a scene shows its static screenshot for the few seconds it takes to load (~10 s for the 4K clock scene)
-  and the stream runs ~1 s behind. Span groups keep the screenshot.
+  (0006), so a scene shows its static screenshot while it loads (~1 s for the 4K clock scene with 0007, plus about
+  1 s until the player gets a keyframe) and the stream runs ~1 s behind. Span groups keep the screenshot.
 
 ## Licenses
 

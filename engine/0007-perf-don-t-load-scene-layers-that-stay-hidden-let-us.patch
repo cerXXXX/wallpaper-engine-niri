@@ -1,0 +1,643 @@
+From c9e29120774a98d14691f24f5d111e1e46e9df37 Mon Sep 17 00:00:00 2001
+From: cerXXXX <polyakovia2009@gmail.com>
+Date: Fri, 9 Oct 2026 11:15:17 +0300
+Subject: [PATCH] perf: don't load scene layers that stay hidden, let users
+ hide layers and effects
+
+Properties are applied once at startup, so a layer hidden by one (another
+language, another clock layout) or by the author, with no script that could
+show it again, is now left out of the scene with everything inside it. The
+multi-language scene 3299228616 drops 253 of its 271 objects and reaches its
+first frame in ~1.0 s instead of ~3.2 s.
+
+New options:
+  --list-layers           print the scene's layers and effects as JSON
+  --hide-layer ID[,ID]    hide a layer and its children (not loaded)
+  --disable-effect ID[,ID] turn off a layer effect
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ CMakeLists.txt                                |   2 +
+ .../Application/ApplicationContext.cpp        |  32 ++++
+ .../Application/ApplicationContext.h          |   9 ++
+ .../Application/WallpaperApplication.cpp      |  58 +++++++
+ .../Application/WallpaperApplication.h        |   4 +
+ src/WallpaperEngine/Data/Model/Wallpaper.h    |   2 +
+ .../Data/Parsers/WallpaperParser.cpp          |  37 +++++
+ .../Data/Parsers/WallpaperParser.h            |   1 +
+ .../Data/Utils/SceneVisibility.cpp            | 142 ++++++++++++++++++
+ .../Data/Utils/SceneVisibility.h              |  33 ++++
+ src/WallpaperEngine/Render/Objects/CImage.cpp |  13 +-
+ .../Render/Wallpapers/CScene.cpp              |  26 ++++
+ .../Render/Wallpapers/CScene.h                |   4 +
+ src/main.cpp                                  |   2 +-
+ 14 files changed, 362 insertions(+), 3 deletions(-)
+ create mode 100644 src/WallpaperEngine/Data/Utils/SceneVisibility.cpp
+ create mode 100644 src/WallpaperEngine/Data/Utils/SceneVisibility.h
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 6e1642fa..5478838f 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -479,6 +479,8 @@ set(COMMON_SOURCES
+     src/WallpaperEngine/Data/Model/Property.h
+     src/WallpaperEngine/Data/Utils/TypeCaster.h
+     src/WallpaperEngine/Data/Utils/BinaryReader.cpp
++    src/WallpaperEngine/Data/Utils/SceneVisibility.cpp
++    src/WallpaperEngine/Data/Utils/SceneVisibility.h
+     src/WallpaperEngine/Data/Utils/BinaryReader.h
+     src/WallpaperEngine/Data/Utils/MemoryStream.h
+     src/WallpaperEngine/Data/Utils/SFINAE.h
+diff --git a/src/WallpaperEngine/Application/ApplicationContext.cpp b/src/WallpaperEngine/Application/ApplicationContext.cpp
+index b5f0e45f..44f08409 100644
+--- a/src/WallpaperEngine/Application/ApplicationContext.cpp
++++ b/src/WallpaperEngine/Application/ApplicationContext.cpp
+@@ -609,6 +609,38 @@ void ApplicationContext::loadSettingsFromArgv () {
+ 	})
+ 	.append ();
+ 
++    const auto parseIdList = [] (const std::string& value, std::vector<int>& into) -> void {
++	std::stringstream list (value);
++	std::string id;
++
++	while (std::getline (list, id, ',')) {
++	    try {
++		into.push_back (std::stoi (id));
++	    } catch (const std::exception&) {
++		sLog.exception ("Invalid layer or effect id: ", id);
++	    }
++	}
++    };
++
++    configurationGroup.add_argument ("--list-layers")
++	.help ("Prints the scene's layers and their effects as JSON, taking --set-property values into account")
++	.flag ()
++	.store_into (this->settings.general.onlyListLayers);
++
++    configurationGroup.add_argument ("--hide-layer")
++	.help ("Hides the scene layer with the given id (or comma-separated ids) and everything inside it")
++	.action ([this, parseIdList] (const std::string& value) -> void {
++	    parseIdList (value, this->settings.general.hiddenLayers);
++	})
++	.append ();
++
++    configurationGroup.add_argument ("--disable-effect")
++	.help ("Turns off the layer effect with the given id (or comma-separated ids)")
++	.action ([this, parseIdList] (const std::string& value) -> void {
++	    parseIdList (value, this->settings.general.disabledEffects);
++	})
++	.append ();
++
+     auto& debuggingGroup = program.add_group ("Debugging options");
+ 
+     debuggingGroup.add_argument ("-z", "--dump-structure")
+diff --git a/src/WallpaperEngine/Application/ApplicationContext.h b/src/WallpaperEngine/Application/ApplicationContext.h
+index 87c570f0..a0f3fda2 100644
+--- a/src/WallpaperEngine/Application/ApplicationContext.h
++++ b/src/WallpaperEngine/Application/ApplicationContext.h
+@@ -83,6 +83,8 @@ public:
+ 	    bool onlyListProperties;
+ 	    /** If the user requested a dump of the background structure */
+ 	    bool dumpStructure;
++	    /** If the user requested the scene's layers and effects as JSON */
++	    bool onlyListLayers;
+ 	    /** If the user requested the particles to be deactivated */
+ 	    bool disableParticles;
+ 	    /** The path to the assets folder */
+@@ -93,6 +95,10 @@ public:
+ 	    std::map<std::string, std::filesystem::path> screenBackgrounds;
+ 	    /** Properties to change values for */
+ 	    std::map<std::string, std::string> properties;
++	    /** Scene layers the user turned off, they're not loaded at all */
++	    std::vector<int> hiddenLayers;
++	    /** Layer effects the user turned off */
++	    std::vector<int> disabledEffects;
+ 	    /** The scaling mode for different screens */
+ 	    std::map<std::string, WallpaperEngine::Render::WallpaperState::TextureUVsScaling> screenScalings;
+ 	    /** The clamping mode for different screens */
+@@ -191,10 +197,13 @@ public:
+         .general = {
+             .onlyListProperties = false,
+             .dumpStructure = false,
++            .onlyListLayers = false,
+             .assets = "",
+             .defaultBackground = "",
+             .screenBackgrounds = {},
+             .properties = {},
++            .hiddenLayers = {},
++            .disabledEffects = {},
+             .screenScalings = {},
+             .screenClamps = {},
+             .screenPlaylists = {},
+diff --git a/src/WallpaperEngine/Application/WallpaperApplication.cpp b/src/WallpaperEngine/Application/WallpaperApplication.cpp
+index 88fa1fd7..271f2e71 100644
+--- a/src/WallpaperEngine/Application/WallpaperApplication.cpp
++++ b/src/WallpaperEngine/Application/WallpaperApplication.cpp
+@@ -14,6 +14,7 @@
+ 
+ #include "WallpaperEngine/Data/Model/Property.h"
+ #include "WallpaperEngine/Data/Model/Wallpaper.h"
++#include "WallpaperEngine/Data/Utils/SceneVisibility.h"
+ #include "WallpaperEngine/Debugging/CallStack.h"
+ #include "WallpaperEngine/FileSystem/Adapters/MediaCover.h"
+ #include "WallpaperEngine/Media/DBusMediaSource.h"
+@@ -25,6 +26,7 @@
+ #include <algorithm>
+ #include <climits>
+ #include <numeric>
++#include <ranges>
+ #include <unistd.h>
+ #define STB_IMAGE_WRITE_IMPLEMENTATION
+ #include <stb_image_write.h>
+@@ -66,6 +68,12 @@ WallpaperApplication::WallpaperApplication (ApplicationContext& context) : m_con
+     this->initializeSubsystems ();
+     this->loadBackgrounds ();
+     this->setupProperties ();
++
++    if (this->m_context.settings.general.onlyListLayers) {
++	this->listLayers ();
++	return;
++    }
++
+     this->setupBrowser ();
+     this->initializePlaylists ();
+ }
+@@ -544,6 +552,56 @@ void WallpaperApplication::setupProperties () {
+     }
+ }
+ 
++void WallpaperApplication::listLayers () const {
++    using Json = Data::JSON::JSON;
++
++    for (const auto& project : this->m_backgrounds | std::views::values) {
++	if (!project->wallpaper->is<Scene> ()) {
++	    continue;
++	}
++
++	const auto& scene = *project->wallpaper->as<Scene> ();
++	// what the scene itself hides with the current properties, the user's own choices are left out
++	const auto visibility = Data::Utils::computeSceneVisibility (scene, {});
++	auto layers = Json::array ();
++
++	for (const auto& object : scene.objects) {
++	    std::string type = "group";
++	    auto effects = Json::array ();
++
++	    if (object->is<Image> ()) {
++		type = "image";
++
++		for (const auto& effect : object->as<Image> ()->effects) {
++		    effects.push_back ({
++			{ "id", effect->id },
++			{ "name", effect->name.empty () ? effect->effect->name : effect->name },
++			{ "hidden",
++			  !effect->visible->value->getBool () && !effect->visible->value->getScriptSource ().has_value () },
++		    });
++		}
++	    } else if (object->is<Text> ()) {
++		type = "text";
++	    } else if (object->is<Particle> ()) {
++		type = "particle";
++	    } else if (object->is<Sound> ()) {
++		type = "sound";
++	    }
++
++	    layers.push_back ({
++		{ "id", object->id },
++		{ "name", object->name },
++		{ "type", type },
++		{ "parent", object->parent.has_value () ? Json (object->parent.value ()) : Json (nullptr) },
++		{ "hidden", visibility.hidden.contains (object->id) },
++		{ "effects", effects },
++	    });
++	}
++
++	std::cout << Json ({ { "layers", layers } }).dump () << std::endl;
++    }
++}
++
+ void WallpaperApplication::setupBrowser () {
+     bool anyWebProject = std::any_of (
+ 	this->m_backgrounds.begin (), this->m_backgrounds.end (),
+diff --git a/src/WallpaperEngine/Application/WallpaperApplication.h b/src/WallpaperEngine/Application/WallpaperApplication.h
+index 8d709305..81fdc68e 100644
+--- a/src/WallpaperEngine/Application/WallpaperApplication.h
++++ b/src/WallpaperEngine/Application/WallpaperApplication.h
+@@ -114,6 +114,10 @@ private:
+      * @param project
+      */
+     void setupPropertiesForProject (const Project& project);
++    /**
++     * Prints the layers of every scene background as JSON (for --list-layers)
++     */
++    void listLayers () const;
+     /**
+      * Prepares CEF browser to be used
+      */
+diff --git a/src/WallpaperEngine/Data/Model/Wallpaper.h b/src/WallpaperEngine/Data/Model/Wallpaper.h
+index 02f7a75e..65e91c60 100644
+--- a/src/WallpaperEngine/Data/Model/Wallpaper.h
++++ b/src/WallpaperEngine/Data/Model/Wallpaper.h
+@@ -106,6 +106,8 @@ struct SceneData {
+     } camera;
+ 
+     ObjectList objects;
++    /** Scripts that look layers up (thisScene.getLayer ()), these might show a layer that starts hidden */
++    std::vector<std::string> layerScripts;
+ };
+ 
+ class Scene final : public Wallpaper, public SceneData {
+diff --git a/src/WallpaperEngine/Data/Parsers/WallpaperParser.cpp b/src/WallpaperEngine/Data/Parsers/WallpaperParser.cpp
+index c108a0df..f168f031 100644
+--- a/src/WallpaperEngine/Data/Parsers/WallpaperParser.cpp
++++ b/src/WallpaperEngine/Data/Parsers/WallpaperParser.cpp
+@@ -78,6 +78,7 @@ SceneUniquePtr WallpaperParser::parseScene (const JSON& file, Project& project)
+                 }
+             },
+             .objects = parseObjects (objects, project),
++            .layerScripts = findLayerScripts (objects),
+         }
+     );
+ }
+@@ -93,6 +94,42 @@ WebUniquePtr WallpaperParser::parseWeb (const JSON& file, Project& project) {
+     });
+ }
+ 
++std::vector<std::string> WallpaperParser::findLayerScripts (const JSON& objects) {
++    std::vector<std::string> result;
++    std::vector<const JSON*> pending = { &objects };
++
++    while (!pending.empty ()) {
++	const JSON* current = pending.back ();
++	pending.pop_back ();
++
++	if (current->is_array ()) {
++	    for (const auto& value : *current) {
++		pending.push_back (&value);
++	    }
++	    continue;
++	}
++
++	if (!current->is_object ()) {
++	    continue;
++	}
++
++	for (const auto& [key, value] : current->items ()) {
++	    if (key != "script" || !value.is_string ()) {
++		pending.push_back (&value);
++		continue;
++	    }
++
++	    const auto& script = value.get_ref<const std::string&> ();
++
++	    if (script.find ("getLayer") != std::string::npos || script.find ("enumerateLayers") != std::string::npos) {
++		result.push_back (script);
++	    }
++	}
++    }
++
++    return result;
++}
++
+ ObjectList WallpaperParser::parseObjects (const JSON& objects, const Project& project) {
+     ObjectList result = {};
+ 
+diff --git a/src/WallpaperEngine/Data/Parsers/WallpaperParser.h b/src/WallpaperEngine/Data/Parsers/WallpaperParser.h
+index a8d2cabb..e074364f 100644
+--- a/src/WallpaperEngine/Data/Parsers/WallpaperParser.h
++++ b/src/WallpaperEngine/Data/Parsers/WallpaperParser.h
+@@ -16,5 +16,6 @@ private:
+     static VideoUniquePtr parseVideo (const JSON& file, Project& project);
+     static WebUniquePtr parseWeb (const JSON& file, Project& project);
+     static ObjectList parseObjects (const JSON& objects, const Project& project);
++    static std::vector<std::string> findLayerScripts (const JSON& objects);
+ };
+ } // namespace WallpaperEngine::Data::Parsers
+diff --git a/src/WallpaperEngine/Data/Utils/SceneVisibility.cpp b/src/WallpaperEngine/Data/Utils/SceneVisibility.cpp
+new file mode 100644
+index 00000000..f7a7e95d
+--- /dev/null
++++ b/src/WallpaperEngine/Data/Utils/SceneVisibility.cpp
+@@ -0,0 +1,142 @@
++#include "SceneVisibility.h"
++
++#include <algorithm>
++#include <map>
++#include <ranges>
++#include <regex>
++
++using namespace WallpaperEngine::Data::Model;
++using namespace WallpaperEngine::Data::Utils;
++
++namespace {
++constexpr int kMaxParentDepth = 32;
++
++const UserSetting* typedVisible (const Object& object) {
++    if (object.is<Image> ()) {
++	return object.as<Image> ()->visible.get ();
++    }
++    if (object.is<Text> ()) {
++	return object.as<Text> ()->visible.get ();
++    }
++    if (object.is<Particle> ()) {
++	return object.as<Particle> ()->visible.get ();
++    }
++
++    return nullptr;
++}
++
++bool isScripted (const UserSetting* setting) {
++    return setting != nullptr && setting->value->getScriptSource ().has_value ();
++}
++
++bool isOff (const UserSetting* setting) { return setting != nullptr && !setting->value->getBool (); }
++
++/** Ids of the layers whose output a texture name like _rt_imageLayerComposite_123_a reads */
++void collectTextureLayers (const TextureMap& textures, std::vector<int>& result) {
++    static const std::regex layerTexture ("_rt_imageLayer[A-Za-z]*_(-?[0-9]+)");
++
++    for (const auto& name : textures | std::views::values) {
++	for (std::sregex_iterator it (name.begin (), name.end (), layerTexture), end; it != end; ++it) {
++	    result.push_back (std::stoi ((*it)[1].str ()));
++	}
++    }
++}
++
++/** Everything a created object needs created as well: its parent and the layers it reads from */
++std::vector<int> objectNeeds (const Object& object) {
++    std::vector<int> result = object.dependencies;
++
++    if (object.parent.has_value ()) {
++	result.push_back (object.parent.value ());
++    }
++
++    if (object.is<Image> ()) {
++	for (const auto& effect : object.as<Image> ()->effects) {
++	    for (const auto& passOverride : effect->passOverrides) {
++		collectTextureLayers (passOverride->textures, result);
++		collectTextureLayers (passOverride->usertextures, result);
++	    }
++	}
++    }
++
++    return result;
++}
++} // namespace
++
++bool WallpaperEngine::Data::Utils::isHiddenForGood (
++    const Object& object, const std::vector<std::string>& layerScripts
++) {
++    const UserSetting* group = object.groupVisible.get ();
++    const UserSetting* typed = typedVisible (object);
++
++    if (isScripted (group) || isScripted (typed) || (!isOff (group) && !isOff (typed))) {
++	return false;
++    }
++
++    // a script somewhere might fetch the layer with thisScene.getLayer () and show it again
++    const std::string id = std::to_string (object.id);
++
++    return std::ranges::none_of (layerScripts, [&] (const std::string& script) {
++	return (!object.name.empty () && script.find (object.name) != std::string::npos)
++	    || script.find (id) != std::string::npos;
++    });
++}
++
++SceneVisibility
++WallpaperEngine::Data::Utils::computeSceneVisibility (const Scene& scene, const std::vector<int>& hiddenLayers) {
++    SceneVisibility result;
++    std::map<int, const Object*> objects;
++
++    for (const auto& object : scene.objects) {
++	objects.emplace (object->id, object.get ());
++    }
++
++    for (const auto& object : scene.objects) {
++	bool hidden = false;
++	bool hiddenByUser = false;
++	const Object* current = object.get ();
++
++	for (int depth = 0; current != nullptr && depth <= kMaxParentDepth; ++depth) {
++	    hiddenByUser = hiddenByUser || std::ranges::find (hiddenLayers, current->id) != hiddenLayers.end ();
++	    hidden = hidden || hiddenByUser || isHiddenForGood (*current, scene.layerScripts);
++
++	    if (!current->parent.has_value ()) {
++		break;
++	    }
++
++	    const auto parent = objects.find (current->parent.value ());
++	    current = parent == objects.end () ? nullptr : parent->second;
++	}
++
++	if (hidden) {
++	    result.hidden.insert (object->id);
++	}
++	if (hiddenByUser) {
++	    result.hiddenByUser.insert (object->id);
++	}
++    }
++
++    // objects that get drawn pull in what they need, even when it's hidden itself
++    std::vector<int> pending;
++
++    for (const auto& object : scene.objects) {
++	if (!result.hidden.contains (object->id)) {
++	    std::ranges::copy (objectNeeds (*object), std::back_inserter (pending));
++	}
++    }
++
++    while (!pending.empty ()) {
++	const int id = pending.back ();
++	pending.pop_back ();
++
++	if (!result.hidden.contains (id) || !result.required.insert (id).second) {
++	    continue;
++	}
++
++	if (const auto object = objects.find (id); object != objects.end ()) {
++	    std::ranges::copy (objectNeeds (*object->second), std::back_inserter (pending));
++	}
++    }
++
++    return result;
++}
+diff --git a/src/WallpaperEngine/Data/Utils/SceneVisibility.h b/src/WallpaperEngine/Data/Utils/SceneVisibility.h
+new file mode 100644
+index 00000000..60ce6367
+--- /dev/null
++++ b/src/WallpaperEngine/Data/Utils/SceneVisibility.h
+@@ -0,0 +1,33 @@
++#pragma once
++
++#include <set>
++#include <vector>
++
++#include "WallpaperEngine/Data/Model/Object.h"
++#include "WallpaperEngine/Data/Model/Wallpaper.h"
++
++namespace WallpaperEngine::Data::Utils {
++/**
++ * Which objects of a scene can never show up during this run. Properties are only applied at startup, so an object
++ * hidden by one (a language, a clock layout...) stays hidden, and so does everything inside it.
++ */
++struct SceneVisibility {
++    /** Objects that are never drawn: hidden by the scene or by the user, or inside a group that is */
++    std::set<int> hidden;
++    /** Objects hidden by the user (--hide-layer), and everything inside them */
++    std::set<int> hiddenByUser;
++    /** Hidden objects that are still created because something that is drawn depends on them */
++    std::set<int> required;
++
++    /** Whether the object can be left out of the scene altogether */
++    [[nodiscard]] bool skipCreation (int id) const { return hidden.contains (id) && !required.contains (id); }
++};
++
++/**
++ * Whether the object's own "visible" hides it for the whole run: it's false (because of a property or set by the
++ * author) and no script could flip it, neither its own nor one that looks layers up by name or id
++ */
++bool isHiddenForGood (const Model::Object& object, const std::vector<std::string>& layerScripts);
++
++SceneVisibility computeSceneVisibility (const Model::Scene& scene, const std::vector<int>& hiddenLayers);
++} // namespace WallpaperEngine::Data::Utils
+diff --git a/src/WallpaperEngine/Render/Objects/CImage.cpp b/src/WallpaperEngine/Render/Objects/CImage.cpp
+index b269f5ea..0d707cd3 100644
+--- a/src/WallpaperEngine/Render/Objects/CImage.cpp
++++ b/src/WallpaperEngine/Render/Objects/CImage.cpp
+@@ -654,7 +654,7 @@ void CImage::setup () {
+ 	// Some have attempted to declare effects with visible set to false.
+ 	bool allEffectsInvisible = true;
+ 	for (const auto& cur : this->m_image.effects) {
+-	    if (cur->visible->value->getBool ()) {
++	    if (cur->visible->value->getBool () && !this->getScene ().isEffectDisabled (cur->id)) {
+ 		allEffectsInvisible = false;
+ 		break;
+ 	    }
+@@ -706,6 +706,10 @@ void CImage::setup () {
+ 		continue;
+ 	    }
+ 
++	    if (this->getScene ().isEffectDisabled (cur->id)) {
++		continue;
++	    }
++
+ 	    // do not add non-visible effects, this might need some adjustements tho as some effects might not be
+ 	    // visible but affect the output of the image...
+ 	    if (!cur->visible->value->getBool ()) {
+@@ -790,7 +794,12 @@ void CImage::setup () {
+     }
+ 
+     if (!debug.baseOnly) {
+-	const auto magentaCompositeTint = findMagentaCompositeTint (this->m_image, debug.skipEffects);
++	std::vector<int> skippedEffects = debug.skipEffects;
++	std::ranges::copy (
++	    this->getScene ().getContext ().getApp ().getContext ().settings.general.disabledEffects,
++	    std::back_inserter (skippedEffects)
++	);
++	const auto magentaCompositeTint = findMagentaCompositeTint (this->m_image, skippedEffects);
+ 	if (magentaCompositeTint.has_value ()) {
+ 	    auto tintOverride = std::make_unique<ImageEffectPassOverride> (ImageEffectPassOverride {
+ 		.id = -1,
+diff --git a/src/WallpaperEngine/Render/Wallpapers/CScene.cpp b/src/WallpaperEngine/Render/Wallpapers/CScene.cpp
+index 1d3a1300..b760f574 100644
+--- a/src/WallpaperEngine/Render/Wallpapers/CScene.cpp
++++ b/src/WallpaperEngine/Render/Wallpapers/CScene.cpp
+@@ -101,6 +101,19 @@ CScene::CScene (
+ 
+     glClearColor (clearColor.r, clearColor.g, clearColor.b, 1.0f);
+ 
++    // objects that stay hidden for the whole run (another language, another clock layout...) are never created,
++    // which saves loading their textures and compiling their shaders
++    this->m_visibility = Data::Utils::computeSceneVisibility (
++	*scene, this->getContext ().getApp ().getContext ().settings.general.hiddenLayers
++    );
++
++    if (!this->m_visibility.hidden.empty ()) {
++	sLog.out (
++	    "Skipping ", this->m_visibility.hidden.size () - this->m_visibility.required.size (), " of ",
++	    scene->objects.size (), " objects that are hidden for good"
++	);
++    }
++
+     // create all objects based off their dependencies
+     for (const auto& object : scene->objects) {
+ 	this->createObject (*object);
+@@ -198,6 +211,10 @@ Render::CObject* CScene::createObject (const Object& object) {
+ 	return current->second;
+     }
+ 
++    if (this->m_visibility.skipCreation (object.id)) {
++	return nullptr;
++    }
++
+     // check dependencies too!
+     for (const auto& cur : object.dependencies) {
+ 	// self-dependency is a possibility...
+@@ -368,6 +385,10 @@ void CScene::renderFrame (const glm::ivec4& viewport) {
+ 	if (std::ranges::find (debug.skipObjects, cur->getId ()) != debug.skipObjects.end ()) {
+ 	    continue;
+ 	}
++	// hidden by the user but still created because a visible layer depends on it
++	if (this->m_visibility.hiddenByUser.contains (cur->getId ())) {
++	    continue;
++	}
+ 
+ 	cur->render ();
+     }
+@@ -432,6 +453,11 @@ const glm::vec2* CScene::getParallaxDisplacement () const { return &this->m_para
+ 
+ const std::vector<CObject*>& CScene::getObjectsByRenderOrder () const { return this->m_objectsByRenderOrder; }
+ 
++bool CScene::isEffectDisabled (int id) const {
++    return std::ranges::find (this->getContext ().getApp ().getContext ().settings.general.disabledEffects, id)
++	!= this->getContext ().getApp ().getContext ().settings.general.disabledEffects.end ();
++}
++
+ const CObject* CScene::getObject (int id) const {
+     const auto object = this->m_objects.find (id);
+     return object == this->m_objects.end () ? nullptr : object->second;
+diff --git a/src/WallpaperEngine/Render/Wallpapers/CScene.h b/src/WallpaperEngine/Render/Wallpapers/CScene.h
+index 61734072..93a2edb9 100644
+--- a/src/WallpaperEngine/Render/Wallpapers/CScene.h
++++ b/src/WallpaperEngine/Render/Wallpapers/CScene.h
+@@ -2,6 +2,7 @@
+ 
+ #include "WallpaperEngine/Render/Camera.h"
+ 
++#include "WallpaperEngine/Data/Utils/SceneVisibility.h"
+ #include "WallpaperEngine/Render/CWallpaper.h"
+ #include "WallpaperEngine/Scripting/ScriptEngine.h"
+ 
+@@ -45,6 +46,8 @@ public:
+ 
+     [[nodiscard]] const std::vector<CObject*>& getObjectsByRenderOrder () const;
+     [[nodiscard]] const CObject* getObject (int id) const;
++    /** Whether the user turned this layer effect off (--disable-effect) */
++    [[nodiscard]] bool isEffectDisabled (int id) const;
+ 
+ protected:
+     void renderFrame (const glm::ivec4& viewport) override;
+@@ -61,6 +64,7 @@ private:
+     std::unique_ptr<Camera> m_camera;
+     ObjectUniquePtr m_bloomObjectData;
+     CObject* m_bloomObject = nullptr;
++    Data::Utils::SceneVisibility m_visibility = {};
+     std::map<int, CObject*> m_objects = {};
+     std::vector<CObject*> m_objectsByRenderOrder = {};
+     std::vector<DynamicValue*> m_scriptedValues = {};
+diff --git a/src/main.cpp b/src/main.cpp
+index 908ab69f..337bdf40 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -50,7 +50,7 @@ int main (int argc, char* argv[]) {
+ 	app = new WallpaperEngine::Application::WallpaperApplication (appContext);
+ 
+ 	// halt if the list-properties option was specified
+-	if (appContext.settings.general.onlyListProperties) {
++	if (appContext.settings.general.onlyListProperties || appContext.settings.general.onlyListLayers) {
+ 	    delete app;
+ 	    return 0;
+ 	}
+-- 
+2.55.0
+
