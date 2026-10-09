@@ -9,12 +9,33 @@ My setup for animated [Wallpaper Engine](https://store.steampowered.com/app/4319
 | Part | What it does |
 |---|---|
 | [dms-wallpaperengine-dashbridge](https://github.com/cerXXXX/dms-wallpaperengine-dashbridge) | DMS plugin (separate repo): the whole Workshop library in the DMS wallpaper picker, keeps the DMS wallpaper from covering the engine, video wallpapers on the lock screen |
-| [dms-wallpaperengine](https://github.com/cerXXXX/dms-wallpaperengine) | Fork of the Linux Wallpaper Engine DMS plugin (separate repo): **Downscale to Screen** toggle, per-scene render settings, live scenes on the lock screen, stale screenshot timer fix |
+| [dms-wallpaperengine](https://github.com/cerXXXX/dms-wallpaperengine) | Fork of the Linux Wallpaper Engine DMS plugin (separate repo): **Downscale to Screen** toggle, separate scene/video FPS, per-scene render settings, scene properties with readable choices (language picker, color picker, options of other languages hidden), **Layers & Effects** to turn parts of a scene off, live scenes on the lock screen, stale screenshot timer fix |
 | [`engine/`](engine) | linux-wallpaperengine patches + PKGBUILD: zero-copy VA-API video, correct video frame pacing, video wallpapers rendered at the video's frame rate, `--downscale-to-output`, scene clocks/text and scripts that work, `--stream` (live scenes for the lock screen), hidden layers not loaded and layers/effects the user can turn off |
 | [`dms-lock-screen/`](dms-lock-screen) | DMS patch + pacman hook: a video set as the lock screen wallpaper (or the desktop's Wallpaper Engine video) plays behind the clock and password field, the desktop's Wallpaper Engine scene runs live there; a **Blur Wallpaper** toggle for the lock screen background |
 | [`system/`](system) | niri layer rule, `makepkg.conf` without `-debug` packages |
 
-## Install from scratch
+## Install or update everything
+
+```sh
+git clone https://github.com/cerXXXX/wallpaper-engine-niri
+cd wallpaper-engine-niri
+./install.sh
+```
+
+Updating later: `git pull && ./install.sh`. The script, run as your user (it asks for sudo itself):
+
+- builds and installs the patched engine with `makepkg -Csi`, unless that version is already installed;
+- clones both DMS plugins into `~/.config/DankMaterialShell/plugins`, or updates existing checkouts with
+  `git pull --ff-only` (a checkout of the upstream plugin is switched to the fork first; one on another branch or
+  with local changes is left alone with a warning);
+- installs or updates the lock screen patch (`sudo bash dms-lock-screen/install.sh`);
+- warns if the niri layer rule is missing from `~/.config/niri/config.kdl` (it doesn't edit your config);
+- restarts DMS and enables newly cloned plugins.
+
+Options: `--no-engine`, `--rebuild-engine`, `--no-lock-screen`, `--no-restart`. Wallpaper Engine itself (step 1
+below) and the plugin settings (step 5) are still up to you.
+
+## Install by hand
 
 1. **Wallpaper Engine.** Buy and install it through Steam (linux-wallpaperengine needs its `assets`), subscribe to
    wallpapers in the Workshop.
