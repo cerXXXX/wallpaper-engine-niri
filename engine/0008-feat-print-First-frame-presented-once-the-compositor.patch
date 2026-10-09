@@ -1,0 +1,299 @@
+From 9f3b871997c249c3079e10e57fb6eb7f2563c3b2 Mon Sep 17 00:00:00 2001
+From: cerXXXX <polyakovia2009@gmail.com>
+Date: Fri, 9 Oct 2026 16:20:44 +0300
+Subject: [PATCH] feat: print "First frame presented" once the compositor shows
+ the wallpaper
+
+A launcher that freezes the engine (SIGSTOP while on power saver) has to
+know when a frame with the wallpaper's content is on the screen, or it
+freezes an empty surface. Wayland frame callbacks of frames that showed
+content mark their screen as presented; once every wallpaper's screen is,
+"First frame presented" is printed. Videos count from mpv's first
+decoded frame (MPV_EVENT_PLAYBACK_RESTART), not the empty texture before.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../Application/WallpaperApplication.cpp      |  4 ++++
+ .../Application/WallpaperApplication.h        |  4 ++++
+ src/WallpaperEngine/Render/CWallpaper.cpp     |  2 ++
+ src/WallpaperEngine/Render/CWallpaper.h       |  6 +++++
+ .../Render/Drivers/Output/OutputViewport.h    |  2 ++
+ .../Drivers/Output/WaylandOutputViewport.cpp  |  5 ++++
+ .../Drivers/Output/WaylandOutputViewport.h    |  2 ++
+ src/WallpaperEngine/Render/RenderContext.cpp  | 24 ++++++++++++++++++-
+ src/WallpaperEngine/Render/RenderContext.h    |  9 +++++++
+ .../Render/Wallpapers/CVideo.cpp              |  2 ++
+ .../Render/Wallpapers/CVideo.h                |  1 +
+ .../VideoPlayback/MPV/GLPlayer.cpp            |  6 +++++
+ .../VideoPlayback/MPV/GLPlayer.h              |  5 ++++
+ 13 files changed, 71 insertions(+), 1 deletion(-)
+
+diff --git a/src/WallpaperEngine/Application/WallpaperApplication.cpp b/src/WallpaperEngine/Application/WallpaperApplication.cpp
+index 271f2e71..6c655b79 100644
+--- a/src/WallpaperEngine/Application/WallpaperApplication.cpp
++++ b/src/WallpaperEngine/Application/WallpaperApplication.cpp
+@@ -1084,6 +1084,10 @@ void WallpaperApplication::update (Render::Drivers::Output::OutputViewport* view
+     m_renderContext->render (viewport);
+ }
+ 
++void WallpaperApplication::framePresented (const Render::Drivers::Output::OutputViewport* viewport) {
++    m_renderContext->framePresented (viewport);
++}
++
+ void WallpaperApplication::signal (int signal) {
+     sLog.out ("Stop requested by signal ", signal);
+     this->m_context.state.general.keepRunning = false;
+diff --git a/src/WallpaperEngine/Application/WallpaperApplication.h b/src/WallpaperEngine/Application/WallpaperApplication.h
+index 81fdc68e..83f50b6e 100644
+--- a/src/WallpaperEngine/Application/WallpaperApplication.h
++++ b/src/WallpaperEngine/Application/WallpaperApplication.h
+@@ -67,6 +67,10 @@ public:
+      * Renders a frame
+      */
+     void update (Render::Drivers::Output::OutputViewport* viewport);
++    /**
++     * The compositor has shown a frame with the wallpaper's content on the viewport
++     */
++    void framePresented (const Render::Drivers::Output::OutputViewport* viewport);
+     /**
+      * Gets the output
+      */
+diff --git a/src/WallpaperEngine/Render/CWallpaper.cpp b/src/WallpaperEngine/Render/CWallpaper.cpp
+index c0672fe4..6ac12194 100644
+--- a/src/WallpaperEngine/Render/CWallpaper.cpp
++++ b/src/WallpaperEngine/Render/CWallpaper.cpp
+@@ -311,6 +311,8 @@ void CWallpaper::setPause (bool newState) { }
+ 
+ double CWallpaper::getContentFrameRate () const { return 0.0; }
+ 
++bool CWallpaper::hasContent () const { return true; }
++
+ float CWallpaper::getResolutionScale () const { return this->m_resolutionScale; }
+ 
+ glm::vec2 CWallpaper::getRenderSize (const glm::vec2& size) const {
+diff --git a/src/WallpaperEngine/Render/CWallpaper.h b/src/WallpaperEngine/Render/CWallpaper.h
+index 1c5380f8..e6d52f11 100644
+--- a/src/WallpaperEngine/Render/CWallpaper.h
++++ b/src/WallpaperEngine/Render/CWallpaper.h
+@@ -132,6 +132,12 @@ public:
+      */
+     [[nodiscard]] virtual double getContentFrameRate () const;
+ 
++    /**
++     * @return If a rendered frame shows the wallpaper's content yet (a video has nothing to show before its first
++     * decoded frame)
++     */
++    [[nodiscard]] virtual bool hasContent () const;
++
+     /**
+      * @return The factor framebuffers are scaled by so they're no bigger than the output needs, 1 for full size
+      */
+diff --git a/src/WallpaperEngine/Render/Drivers/Output/OutputViewport.h b/src/WallpaperEngine/Render/Drivers/Output/OutputViewport.h
+index 5e90115c..a0fba664 100644
+--- a/src/WallpaperEngine/Render/Drivers/Output/OutputViewport.h
++++ b/src/WallpaperEngine/Render/Drivers/Output/OutputViewport.h
+@@ -19,6 +19,8 @@ public:
+ 
+     /** Whether this viewport is single in the framebuffer or shares space with more viewports */
+     bool single;
++    /** Whether the frame being swapped shows the wallpaper's content (set by the render context before swapping) */
++    bool swappingContent = false;
+ 
+     /**
+      * Activates output's context for drawing
+diff --git a/src/WallpaperEngine/Render/Drivers/Output/WaylandOutputViewport.cpp b/src/WallpaperEngine/Render/Drivers/Output/WaylandOutputViewport.cpp
+index 35a9bfa5..8c0c13a4 100644
+--- a/src/WallpaperEngine/Render/Drivers/Output/WaylandOutputViewport.cpp
++++ b/src/WallpaperEngine/Render/Drivers/Output/WaylandOutputViewport.cpp
+@@ -97,6 +97,10 @@ static void surfaceFrameCallback (void* data, struct wl_callback* cb, uint32_t t
+     wl_callback_destroy (cb);
+ 
+     viewport->frameCallback = nullptr;
++    // the compositor asks for the next frame once it has shown the last one
++    if (viewport->callbackHasContent) {
++	viewport->getDriver ()->getApp ().framePresented (viewport);
++    }
+     viewport->rendering = true;
+     viewport->getDriver ()->getApp ().update (viewport);
+     viewport->rendering = false;
+@@ -265,6 +269,7 @@ void WaylandOutputViewport::swapOutput () {
+ 
+     this->makeCurrent ();
+     frameCallback = wl_surface_frame (surface);
++    callbackHasContent = swappingContent;
+     wl_callback_add_listener (frameCallback, &frameListener, this);
+     eglSwapBuffers (m_driver->getEGLContext ()->display, this->eglSurface);
+     wl_surface_set_buffer_scale (surface, scale);
+diff --git a/src/WallpaperEngine/Render/Drivers/Output/WaylandOutputViewport.h b/src/WallpaperEngine/Render/Drivers/Output/WaylandOutputViewport.h
+index 909b327d..84f1a563 100644
+--- a/src/WallpaperEngine/Render/Drivers/Output/WaylandOutputViewport.h
++++ b/src/WallpaperEngine/Render/Drivers/Output/WaylandOutputViewport.h
+@@ -53,6 +53,8 @@ namespace Output {
+ 	wl_cursor* pointer = nullptr;
+ 	wl_surface* cursorSurface = nullptr;
+ 	bool callbackInitialized = false;
++	/** Whether the frame the pending frame callback belongs to shows the wallpaper's content */
++	bool callbackHasContent = false;
+ 	bool hasXdgLogicalPosition = false;
+ 	zxdg_output_v1* xdgOutput = nullptr;
+ 
+diff --git a/src/WallpaperEngine/Render/RenderContext.cpp b/src/WallpaperEngine/Render/RenderContext.cpp
+index af0112ea..6751a148 100644
+--- a/src/WallpaperEngine/Render/RenderContext.cpp
++++ b/src/WallpaperEngine/Render/RenderContext.cpp
+@@ -6,6 +6,7 @@
+ #include "RenderContext.h"
+ 
+ #include "WallpaperEngine/Data/Model/Project.h"
++#include "WallpaperEngine/Logging/Log.h"
+ 
+ namespace WallpaperEngine::Render {
+ RenderContext::RenderContext (
+@@ -26,12 +27,16 @@ void RenderContext::render (Drivers::Output::OutputViewport* viewport) {
+     // search the background in the viewport selection
+ 
+     // render the background
+-    if (const auto ref = this->m_wallpapers.find (viewport->name); ref != this->m_wallpapers.end ()) {
++    const auto ref = this->m_wallpapers.find (viewport->name);
++
++    if (ref != this->m_wallpapers.end ()) {
+ 	ref->second->render (
+ 	    viewport->viewport, this->getOutput ().renderVFlip (), viewport->globalPosition, viewport->logicalSize
+ 	);
+     }
+ 
++    viewport->swappingContent = ref != this->m_wallpapers.end () && ref->second->hasContent ();
++
+ #if !NDEBUG
+     glPopDebugGroup ();
+ #endif /* DEBUG */
+@@ -39,6 +44,23 @@ void RenderContext::render (Drivers::Output::OutputViewport* viewport) {
+     viewport->swapOutput ();
+ }
+ 
++void RenderContext::framePresented (const Drivers::Output::OutputViewport* viewport) {
++    if (this->m_firstFrameReported) {
++	return;
++    }
++
++    this->m_presented.insert (viewport->name);
++
++    for (const auto& screen : this->m_wallpapers | std::views::keys) {
++	if (!this->m_presented.contains (screen)) {
++	    return;
++	}
++    }
++
++    this->m_firstFrameReported = true;
++    sLog.out ("First frame presented");
++}
++
+ void RenderContext::setWallpaper (const std::string& display, std::shared_ptr<CWallpaper> wallpaper) {
+     wallpaper->setDestinationFramebuffer (this->m_app.getDestinationFramebuffer ());
+     this->m_wallpapers.insert_or_assign (display, wallpaper);
+diff --git a/src/WallpaperEngine/Render/RenderContext.h b/src/WallpaperEngine/Render/RenderContext.h
+index 798e924b..96cb98a8 100644
+--- a/src/WallpaperEngine/Render/RenderContext.h
++++ b/src/WallpaperEngine/Render/RenderContext.h
+@@ -2,6 +2,7 @@
+ 
+ #include <glm/vec4.hpp>
+ #include <memory>
++#include <set>
+ #include <vector>
+ 
+ #include "TextureCache.h"
+@@ -38,6 +39,11 @@ namespace Render {
+ 	RenderContext (Drivers::VideoDriver& driver, WallpaperApplication& app, Media::MediaSource& mediaSource);
+ 
+ 	void render (Drivers::Output::OutputViewport* viewport);
++	/**
++	 * The compositor has shown a frame with the wallpaper's content on the viewport; once every wallpaper's has
++	 * been shown this prints "First frame presented" (a launcher waits for it before freezing the process)
++	 */
++	void framePresented (const Drivers::Output::OutputViewport* viewport);
+ 	void setWallpaper (const std::string& display, std::shared_ptr<CWallpaper> wallpaper);
+ 	void setPause (bool newState) const;
+ 	[[nodiscard]] Input::InputContext& getInputContext () const;
+@@ -59,6 +65,9 @@ namespace Render {
+ 	Media::MediaSource& m_mediaSource;
+ 	/** Texture cache for the render */
+ 	std::unique_ptr<TextureCache> m_textureCache = nullptr;
++	/** Screens whose wallpaper the compositor has shown a frame of */
++	std::set<std::string> m_presented = {};
++	bool m_firstFrameReported = false;
+     };
+ } // namespace Render
+ } // namespace WallpaperEngine
+diff --git a/src/WallpaperEngine/Render/Wallpapers/CVideo.cpp b/src/WallpaperEngine/Render/Wallpapers/CVideo.cpp
+index 05fcc332..9f266ffd 100644
+--- a/src/WallpaperEngine/Render/Wallpapers/CVideo.cpp
++++ b/src/WallpaperEngine/Render/Wallpapers/CVideo.cpp
+@@ -69,3 +69,5 @@ int CVideo::getWidth () const { return this->m_player ? this->m_player->getWidth
+ int CVideo::getHeight () const { return this->m_player ? this->m_player->getHeight () : 16; }
+ 
+ double CVideo::getContentFrameRate () const { return this->m_player ? this->m_player->getFrameRate () : 0.0; }
++
++bool CVideo::hasContent () const { return this->m_player && this->m_player->hasFrame (); }
+diff --git a/src/WallpaperEngine/Render/Wallpapers/CVideo.h b/src/WallpaperEngine/Render/Wallpapers/CVideo.h
+index 7a9889fc..5db8c54e 100644
+--- a/src/WallpaperEngine/Render/Wallpapers/CVideo.h
++++ b/src/WallpaperEngine/Render/Wallpapers/CVideo.h
+@@ -22,6 +22,7 @@ public:
+     [[nodiscard]] int getWidth () const override;
+     [[nodiscard]] int getHeight () const override;
+     [[nodiscard]] double getContentFrameRate () const override;
++    [[nodiscard]] bool hasContent () const override;
+ 
+     void setPause (bool newState) override;
+ 
+diff --git a/src/WallpaperEngine/VideoPlayback/MPV/GLPlayer.cpp b/src/WallpaperEngine/VideoPlayback/MPV/GLPlayer.cpp
+index 6bf0c554..dbbb55e2 100644
+--- a/src/WallpaperEngine/VideoPlayback/MPV/GLPlayer.cpp
++++ b/src/WallpaperEngine/VideoPlayback/MPV/GLPlayer.cpp
+@@ -138,6 +138,11 @@ void GLPlayer::render () const {
+ 	    break;
+ 	}
+ 
++	// playback starts once the first frame is decoded, so this render already draws it
++	if (event->event_id == MPV_EVENT_PLAYBACK_RESTART) {
++	    this->m_hasFrame = true;
++	}
++
+ 	if (event->event_id != MPV_EVENT_VIDEO_RECONFIG) {
+ 	    continue;
+ 	}
+@@ -214,6 +219,7 @@ void GLPlayer::setResolutionScaler (std::function<float (const glm::vec2&)> scal
+ int GLPlayer::getWidth () const { return this->m_width; }
+ int GLPlayer::getHeight () const { return this->m_height; }
+ double GLPlayer::getFrameRate () const { return this->m_frameRate; }
++bool GLPlayer::hasFrame () const { return this->m_hasFrame; }
+ 
+ void GLPlayer::prepareGL () {
+     if (!this->m_doWeOwnFramebuffer || this->m_fbo != GL_NONE) {
+diff --git a/src/WallpaperEngine/VideoPlayback/MPV/GLPlayer.h b/src/WallpaperEngine/VideoPlayback/MPV/GLPlayer.h
+index 66a0bfc9..c70c8156 100644
+--- a/src/WallpaperEngine/VideoPlayback/MPV/GLPlayer.h
++++ b/src/WallpaperEngine/VideoPlayback/MPV/GLPlayer.h
+@@ -60,6 +60,10 @@ public:
+      * @return The video's frame rate as stored in the file, 0 until playback starts or if the file doesn't specify it
+      */
+     double getFrameRate () const;
++    /**
++     * @return If mpv has a decoded frame to render, false until playback starts
++     */
++    bool hasFrame () const;
+ 
+ private:
+     void prepareGL ();
+@@ -76,6 +80,7 @@ protected:
+     mutable int64_t m_width;
+     mutable int64_t m_height;
+     mutable double m_frameRate = 0.0;
++    mutable bool m_hasFrame = false;
+     std::function<float (const glm::vec2&)> m_resolutionScaler;
+     mpv_handle* m_handle = nullptr;
+     mpv_render_context* m_renderContext = nullptr;
+-- 
+2.55.0
+

@@ -138,6 +138,12 @@ All seven apply on upstream `b016d7d` (pinned in the PKGBUILD).
     `--set-property` values;
   - `--hide-layer ID[,ID...]` hides a layer and everything inside it (not loaded either);
   - `--disable-effect ID[,ID...]` turns a layer effect off.
+- **0008 first-frame marker.** Prints `First frame presented` once niri has shown a frame with the wallpaper's
+  content on every screen of the process (the Wayland frame callback of that frame; a video counts from mpv's first
+  decoded frame, `MPV_EVENT_PLAYBACK_RESTART`, not the empty texture before it). The plugin fork freezes paused
+  wallpapers (power saver, battery) with SIGSTOP only after it, so a cold start while paused still shows the
+  wallpaper instead of an empty screen. Measured: 0.6 s for a 1080p video, 1.9 s for the clock scene, 3.7 s for the
+  4K Big Sur scene.
 
 Measured on Intel Iris Xe (Tiger Lake), niri, one 1920x1080@60 output; rendered frames counted from
 `wl_surface.attach` with `WAYLAND_DEBUG=1`, CPU as a share of one core:
