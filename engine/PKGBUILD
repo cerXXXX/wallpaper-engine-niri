@@ -4,7 +4,7 @@ pkgname=linux-wallpaperengine-git
 _pkgname=linux-wallpaperengine
 _commit=b016d7d1fdcf4e5fd2f9c9fa420a8aaa07fee02d
 pkgver=r627.b016d7d1
-pkgrel=6
+pkgrel=7
 pkgdesc="use steam's wallpaperengine on linux (patched: zero-copy VA-API, video frame pacing, --downscale-to-output, scene text/script fixes, --stream, hidden layers not loaded, first-frame marker)"
 arch=('x86_64')
 url="https://github.com/Almamu/linux-wallpaperengine"
@@ -20,7 +20,8 @@ source=("${pkgname}::git+https://github.com/Almamu/linux-wallpaperengine.git#com
         "0005-fix-scene-clocks-compose-layers-and-property-scripts.patch"
         "0006-feat-stream-renders-without-a-window-and-streams-the.patch"
         "0007-perf-don-t-load-scene-layers-that-stay-hidden-let-us.patch"
-        "0008-feat-print-First-frame-presented-once-the-compositor.patch")
+        "0008-feat-print-First-frame-presented-once-the-compositor.patch"
+        "0009-feat-eco-holds-the-wallpaper-still-and-shows-a-frame.patch")
 sha256sums=('faaa2b137b5fb61769ffb0687ae87bb45294556904e96e76b8a46b16f0c522a6'
             '13f211c88024a1f509b0e4b9ab8470b9b836e8657dec644623cff2ba5b481aeb'
             '6764e27aedc9a98bd2db74d6184863bb2fab167c159ae0ee0940225fb50a819c'
@@ -29,7 +30,8 @@ sha256sums=('faaa2b137b5fb61769ffb0687ae87bb45294556904e96e76b8a46b16f0c522a6'
             '007042c3ed3f9586e01e5beee02f94e7339a1e048c8de1c99e0fd61d0bc5a94f'
             '9b619a81509adda63319c1ada04f3c0fda657c40d4a5a910f175c865a12e5684'
             'e653ab7a3073d18454029a197b4b3fa2fd979d3e9fd80c18b3e5b4180d1a8041'
-            '3014c716a6baa42e00efe69b858fd086d0496aec046da2cfb4e47c51c1fb8363')
+            '3014c716a6baa42e00efe69b858fd086d0496aec046da2cfb4e47c51c1fb8363'
+            'baa0f812f4959ebd625f0918afb1684e24e0e5d1352bde3f56c476696e3fa16e')
 
 pkgver() {
     cd "$pkgname"

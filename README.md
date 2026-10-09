@@ -146,6 +146,23 @@ All seven apply on upstream `b016d7d` (pinned in the PKGBUILD).
   wallpapers (power saver, battery) with SIGSTOP only after it, so a cold start while paused still shows the
   wallpaper instead of an empty screen. Measured: 0.6 s for a 1080p video, 1.9 s for the clock scene, 3.7 s for the
   4K Big Sur scene.
+- **0009 eco mode, control channel, sound fades.**
+  - `--eco` holds the wallpaper still once its first frame has been up for a second. The animation time stops
+    (particles, shaders, texture animations; videos pause), scripts keep reading the real time. Every second, just
+    after the second changes, the frame is rendered and hashed and only shown when it changed: a clock with seconds
+    updates every second, one without once a minute, a wallpaper without clocks never. The tick is a `timerfd` that
+    is re-aligned when the clock jumps (suspend, time zone).
+  - `--control` reads commands on stdin (`eco on|off`, `fps <n>`, `mute on|off`), so the plugin switches modes
+    without restarting the engine.
+  - `--frame-file <path>` renders in a hidden window like `--stream` and writes each changed frame as PPM, printing
+    `Frame written`: the lock screen's eco mode.
+  - Sound fades out over 0.5 s (muted, or another app plays) and comes back 2 s after the other app stopped. The
+    automute detector never saw anything on PipeWire (native streams carry their process id on the client, not the
+    stream); it now checks the client, ignores paused streams and other wallpapers, and polls at most every 250 ms.
+    The SDL device is paused while there's nothing to hear (it played silence even with `--silent`), so the sound
+    card can sleep.
+  - Measured (CPU of one core, 15 FPS, 75 s): the clock scene 2.2% and ~15 frames/s normally, 0.37% and one frame a
+    minute (on the minute) with `--eco`; the 1080p video 2.5% → 0.33%.
 
 Measured on Intel Iris Xe (Tiger Lake), niri, one 1920x1080@60 output; rendered frames counted from
 `wl_surface.attach` with `WAYLAND_DEBUG=1`, CPU as a share of one core:

@@ -1,0 +1,1649 @@
+From 98ac7e3b29cbe35873bafb62aaa788c102bfcc96 Mon Sep 17 00:00:00 2001
+From: cerXXXX <84661580+cerXXXX@users.noreply.github.com>
+Date: Fri, 9 Oct 2026 18:55:31 +0300
+Subject: [PATCH] feat: --eco holds the wallpaper still and shows a frame only
+ when it changes
+
+--eco: once the first frame has been up for a second, the animation time
+stops (particles, shaders, texture animations, videos pause) while
+scripts keep reading the real time. Every second, just after the second
+changes (timerfd, re-aligned when the clock jumps), the frame is rendered
+and hashed, and only shown when it differs: a clock with seconds updates
+every second, one without once a minute, a wallpaper without clocks
+never. Frame callbacks don't drive rendering while held.
+
+--control reads commands from stdin: "eco on|off", "fps <n>", "mute on|off",
+so a running wallpaper switches modes without being restarted.
+
+--frame-file renders in a hidden window (like --stream) and writes each
+changed frame as PPM, printing "Frame written" (the lock screen in eco).
+
+Sound fades out (0.5 s) instead of being cut when muted or when another
+app plays, and comes back 2 s after it stopped. The detector now finds
+the process of native PipeWire streams through their client (it never
+saw any before), ignores paused streams and other wallpapers, and checks
+at most every 250 ms. The SDL device is paused while there's nothing to
+hear, so the sound card can sleep (it played silence even with --silent).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01TTuB8NJnTLq87k77DhTeWu
+---
+ CMakeLists.txt                                |   4 +
+ .../Application/ApplicationContext.cpp        |  32 +++++
+ .../Application/ApplicationContext.h          |  16 +++
+ .../Application/ControlChannel.cpp            |  47 +++++++
+ .../Application/ControlChannel.h              |  30 ++++
+ .../Application/WallpaperApplication.cpp      | 131 +++++++++++++++++-
+ .../Application/WallpaperApplication.h        |  37 +++++
+ .../Detectors/AudioPlayingDetector.cpp        |  28 +++-
+ .../Drivers/Detectors/AudioPlayingDetector.h  |  21 ++-
+ .../Audio/Drivers/Detectors/GainRamp.h        |  40 ++++++
+ .../Detectors/PulseAudioPlayingDetector.cpp   |  83 ++++++++---
+ .../Detectors/PulseAudioPlayingDetector.h     |   4 +
+ .../Audio/Drivers/SDLAudioDriver.cpp          |  37 ++++-
+ .../Audio/Drivers/SDLAudioDriver.h            |  14 ++
+ .../Render/Drivers/FrameHash.h                |  36 +++++
+ .../Render/Drivers/GLFWOpenGLDriver.cpp       |  93 ++++++++++++-
+ .../Render/Drivers/GLFWOpenGLDriver.h         |  10 +-
+ .../Drivers/Output/GLFWWindowOutput.cpp       |   2 +-
+ .../Render/Drivers/Output/OutputViewport.h    |   2 +
+ .../Drivers/Output/WaylandOutputViewport.cpp  |  10 ++
+ .../Render/Drivers/VideoDriver.cpp            |  38 ++++-
+ .../Render/Drivers/VideoDriver.h              |  38 ++++-
+ .../Render/Drivers/WaylandOpenGLDriver.cpp    |  66 ++++++++-
+ .../Render/Drivers/WaylandOpenGLDriver.h      |   6 +-
+ src/WallpaperEngine/Render/RenderContext.cpp  |  33 +++++
+ src/WallpaperEngine/Render/RenderContext.h    |  16 +++
+ .../Render/Wallpapers/CVideo.cpp              |  26 ++--
+ .../Render/Wallpapers/CVideo.h                |   8 +-
+ .../Testing/Render/TestingOpenGLDriver.cpp    |   6 +-
+ .../Testing/Render/TestingOpenGLDriver.h      |   2 +-
+ 30 files changed, 856 insertions(+), 60 deletions(-)
+ create mode 100644 src/WallpaperEngine/Application/ControlChannel.cpp
+ create mode 100644 src/WallpaperEngine/Application/ControlChannel.h
+ create mode 100644 src/WallpaperEngine/Audio/Drivers/Detectors/GainRamp.h
+ create mode 100644 src/WallpaperEngine/Render/Drivers/FrameHash.h
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 5478838f..4e3bf078 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -400,6 +400,10 @@ set(COMMON_SOURCES
+     src/WallpaperEngine/Render/Drivers/GLFWOpenGLDriver.cpp
+     src/WallpaperEngine/Render/Drivers/FrameStream.h
+     src/WallpaperEngine/Render/Drivers/FrameStream.cpp
++    src/WallpaperEngine/Render/Drivers/FrameHash.h
++    src/WallpaperEngine/Application/ControlChannel.h
++    src/WallpaperEngine/Application/ControlChannel.cpp
++    src/WallpaperEngine/Audio/Drivers/Detectors/GainRamp.h
+     src/WallpaperEngine/Render/Drivers/VideoDriver.h
+     src/WallpaperEngine/Render/Drivers/VideoDriver.cpp
+     src/WallpaperEngine/Render/RenderContext.h
+diff --git a/src/WallpaperEngine/Application/ApplicationContext.cpp b/src/WallpaperEngine/Application/ApplicationContext.cpp
+index 44f08409..4d43e6ef 100644
+--- a/src/WallpaperEngine/Application/ApplicationContext.cpp
++++ b/src/WallpaperEngine/Application/ApplicationContext.cpp
+@@ -508,6 +508,29 @@ void ApplicationContext::loadSettingsFromArgv () {
+ 	)
+ 	.store_into (this->settings.render.streamTarget);
+ 
++    performanceGroup.add_argument ("--frame-file")
++	.help (
++	    "Renders without showing the window (needs --window for the size) and writes the frame to the given "
++	    "file (PPM) every time it changes, printing \"Frame written\"; meant to be used with --eco"
++	)
++	.store_into (this->settings.render.frameFile);
++
++    performanceGroup.add_argument ("--eco")
++	.help (
++	    "Holds the wallpaper still once its first frame is up: animations stop and a frame is only shown again "
++	    "when it looks different, i.e. when a clock, a text or the time of day changes (checked every second)"
++	)
++	.flag ()
++	.store_into (this->settings.render.eco);
++
++    performanceGroup.add_argument ("--control")
++	.help (
++	    "Reads commands from the standard input, one per line: \"eco on\", \"eco off\", \"fps <n>\", "
++	    "\"mute on\", \"mute off\""
++	)
++	.flag ()
++	.store_into (this->settings.render.control);
++
+     performanceGroup.add_argument ("--no-fullscreen-pause")
+ 	.help ("Prevents the background pausing when an app is fullscreen")
+ 	.flag ()
+@@ -547,6 +570,11 @@ void ApplicationContext::loadSettingsFromArgv () {
+ 	.flag ()
+ 	.action ([this] (const std::string& value) -> void { this->settings.audio.automute = false; });
+ 
++    audioGroup.add_argument ("--muted")
++	.help ("Starts with the sound faded out (\"mute off\" on the control channel fades it in)")
++	.flag ()
++	.store_into (this->settings.audio.muted);
++
+     audioGroup.add_argument ("--no-audio-processing")
+ 	.help ("Disables audio processing for backgrounds")
+ 	.flag ()
+@@ -756,6 +784,10 @@ float ApplicationContext::getTargetFrameRate () const {
+     return content > 0.0f ? std::min (maximum, content) : maximum;
+ }
+ 
++bool ApplicationContext::rendersOffscreen () const {
++    return !this->settings.render.streamTarget.empty () || !this->settings.render.frameFile.empty ();
++}
++
+ int ApplicationContext::getArgc () const { return this->m_argc; }
+ 
+ char** ApplicationContext::getArgv () const { return this->m_argv; }
+diff --git a/src/WallpaperEngine/Application/ApplicationContext.h b/src/WallpaperEngine/Application/ApplicationContext.h
+index a0f3fda2..2c2933d2 100644
+--- a/src/WallpaperEngine/Application/ApplicationContext.h
++++ b/src/WallpaperEngine/Application/ApplicationContext.h
+@@ -135,6 +135,12 @@ public:
+ 	    bool downscaleToOutput;
+ 	    /** Live H.264 stream target (ffmpeg URL) for the rendered frames, the window stays hidden */
+ 	    std::string streamTarget;
++	    /** File the frames are written to (as PPM) while the wallpaper is held, the window stays hidden */
++	    std::string frameFile;
++	    /** If the wallpaper starts held (eco mode): it only changes when its clocks, texts or time of day do */
++	    bool eco;
++	    /** If commands are read from the standard input (see ControlChannel) */
++	    bool control;
+ 	    /** Render debugging switches for scene compatibility work */
+ 	    struct {
+ 		bool baseOnly;
+@@ -170,6 +176,8 @@ public:
+ 	    bool automute;
+ 	    /** If audio processing can be enabled or not */
+ 	    bool audioprocessing;
++	    /** If the audio starts muted (it can be unmuted through the control channel) */
++	    bool muted;
+ 	} audio;
+ 
+ 	/**
+@@ -218,6 +226,9 @@ public:
+             .fullscreenPauseIgnoreAppIds = {},
+             .downscaleToOutput = false,
+             .streamTarget = "",
++            .frameFile = "",
++            .eco = false,
++            .control = false,
+             .debug = {
+                 .baseOnly = false,
+                 .noSolidFinal = false,
+@@ -240,6 +251,7 @@ public:
+             .volume = 15,
+             .automute = true,
+             .audioprocessing = true,
++            .muted = false,
+         },
+         .mouse = {
+             .enabled = true,
+@@ -258,6 +270,10 @@ public:
+      * @return The frame rate to render at: --fps, lowered to the content's own rate when that is known and lower
+      */
+     [[nodiscard]] float getTargetFrameRate () const;
++    /**
++     * @return If the wallpaper is rendered in a hidden window (--stream, --frame-file) instead of on a screen
++     */
++    [[nodiscard]] bool rendersOffscreen () const;
+ 
+     [[nodiscard]] int getArgc () const;
+     [[nodiscard]] char** getArgv () const;
+diff --git a/src/WallpaperEngine/Application/ControlChannel.cpp b/src/WallpaperEngine/Application/ControlChannel.cpp
+new file mode 100644
+index 00000000..87192bb9
+--- /dev/null
++++ b/src/WallpaperEngine/Application/ControlChannel.cpp
+@@ -0,0 +1,47 @@
++#include "ControlChannel.h"
++
++#include <iostream>
++#include <mutex>
++#include <sys/eventfd.h>
++#include <thread>
++#include <unistd.h>
++
++using namespace WallpaperEngine::Application;
++
++struct ControlChannel::State {
++    std::mutex mutex;
++    std::vector<std::string> commands;
++    int eventFd = -1;
++};
++
++ControlChannel::ControlChannel () : m_state (std::make_shared<State> ()) {
++    this->m_state->eventFd = eventfd (0, EFD_CLOEXEC | EFD_NONBLOCK);
++
++    std::thread ([state = this->m_state] () {
++	std::string line;
++
++	while (std::getline (std::cin, line)) {
++	    {
++		std::lock_guard lock (state->mutex);
++		state->commands.push_back (line);
++	    }
++
++	    // a full counter can't happen in practice, and the commands are queued either way
++	    constexpr uint64_t one = 1;
++	    [[maybe_unused]] const ssize_t written = write (state->eventFd, &one, sizeof (one));
++	}
++    }).detach ();
++}
++
++int ControlChannel::fd () const { return this->m_state->eventFd; }
++
++std::vector<std::string> ControlChannel::take () {
++    // reset the eventfd; nothing to read is fine, the queue below is what counts
++    uint64_t count;
++    [[maybe_unused]] const ssize_t got = read (this->m_state->eventFd, &count, sizeof (count));
++
++    std::lock_guard lock (this->m_state->mutex);
++    std::vector<std::string> commands;
++    commands.swap (this->m_state->commands);
++    return commands;
++}
+diff --git a/src/WallpaperEngine/Application/ControlChannel.h b/src/WallpaperEngine/Application/ControlChannel.h
+new file mode 100644
+index 00000000..844e128f
+--- /dev/null
++++ b/src/WallpaperEngine/Application/ControlChannel.h
+@@ -0,0 +1,30 @@
++#pragma once
++
++#include <memory>
++#include <string>
++#include <vector>
++
++namespace WallpaperEngine::Application {
++/**
++ * Commands for a running engine, one per line on the standard input (--control). A thread reads them so the
++ * render loop never blocks on the input; fd () becomes readable when commands are waiting.
++ */
++class ControlChannel {
++public:
++    ControlChannel ();
++
++    /**
++     * @return An eventfd that is readable while commands are waiting to be taken
++     */
++    [[nodiscard]] int fd () const;
++    /**
++     * @return The commands received since the last call, oldest first
++     */
++    [[nodiscard]] std::vector<std::string> take ();
++
++private:
++    struct State;
++    /** Shared with the reader thread, which can outlive this object (it blocks on the input until exit) */
++    std::shared_ptr<State> m_state;
++};
++} // namespace WallpaperEngine::Application
+diff --git a/src/WallpaperEngine/Application/WallpaperApplication.cpp b/src/WallpaperEngine/Application/WallpaperApplication.cpp
+index 6c655b79..b69ca9a8 100644
+--- a/src/WallpaperEngine/Application/WallpaperApplication.cpp
++++ b/src/WallpaperEngine/Application/WallpaperApplication.cpp
+@@ -24,7 +24,10 @@
+ #endif /* DEMOMODE */
+ 
+ #include <algorithm>
++#include <cerrno>
+ #include <climits>
++#include <sstream>
++#include <sys/timerfd.h>
+ #include <numeric>
+ #include <ranges>
+ #include <unistd.h>
+@@ -936,6 +939,12 @@ void WallpaperApplication::setup () {
+     this->prepareOutputs ();
+     this->setupOpenGLDebugging ();
+ 
++    this->m_ecoWanted = this->m_context.settings.render.eco;
++
++    if (this->m_context.settings.render.control) {
++	this->m_control = std::make_unique<ControlChannel> ();
++    }
++
+     if (this->m_context.settings.general.dumpStructure) {
+ 	auto prettyPrinter = Data::Dumpers::StringPrinter ();
+ 
+@@ -960,11 +969,30 @@ void WallpaperApplication::setup () {
+ #endif /* DEMOMODE */
+ }
+ 
++/** How long a wallpaper keeps animating after its first frame before eco mode holds it (intros fading in) */
++static constexpr auto HOLD_WARMUP = std::chrono::seconds (1);
++
+ void WallpaperApplication::render () {
+     static time_t seconds;
+     static struct tm* timeinfo;
+ 
+-    if (this->m_isPaused) {
++    if (this->m_control) {
++	this->runCommands ();
++    }
++
++    if (this->m_ecoWanted != this->m_held) {
++	const auto firstFrameAt = this->m_renderContext->firstFrameAt ();
++
++	if (!this->m_ecoWanted) {
++	    this->setHeld (false);
++	} else if (firstFrameAt.has_value () && std::chrono::steady_clock::now () - *firstFrameAt >= HOLD_WARMUP) {
++	    this->setHeld (true);
++	}
++    }
++
++    if (this->m_held) {
++	this->renderHeldTick ();
++    } else if (this->m_isPaused) {
+ 	usleep (FULLSCREEN_CHECK_WAIT_TIME);
+ 	if (this->m_fullScreenDetector->anythingFullscreen () && this->m_context.state.general.keepRunning) {
+ 	    return;
+@@ -1061,6 +1089,107 @@ void WallpaperApplication::render () {
+     this->m_screenShotTaken = true;
+ }
+ 
++void WallpaperApplication::runCommands () {
++    for (const std::string& line : this->m_control->take ()) {
++	std::istringstream words (line);
++	std::string command, argument;
++	words >> command >> argument;
++
++	if (command == "eco" && (argument == "on" || argument == "off")) {
++	    this->m_ecoWanted = argument == "on";
++	} else if (command == "mute" && (argument == "on" || argument == "off")) {
++	    this->m_audioDetector->setMuted (argument == "on");
++	} else if (command == "fps" && std::atoi (argument.c_str ()) > 0) {
++	    this->m_context.settings.render.maximumFPS = std::atoi (argument.c_str ());
++	} else if (!command.empty ()) {
++	    sLog.error ("Unknown command: ", line);
++	}
++    }
++}
++
++bool WallpaperApplication::isHeld () const { return this->m_held; }
++
++void WallpaperApplication::setHeld (const bool hold) {
++    this->m_held = hold;
++    // the animation time stops, so particles, shaders and texture animations freeze where they are, while scripts
++    // (clocks, dates) keep reading the real time
++    this->m_videoDriver->holdTime (hold);
++    // videos pause
++    this->m_renderContext->setPause (hold);
++
++    if (hold) {
++	sLog.out ("Holding the wallpaper still");
++	this->m_videoDriver->forgetHeldFrames ();
++	this->armHeldTicks ();
++    } else {
++	sLog.out ("Animating the wallpaper again");
++	constexpr itimerspec stop = {};
++	timerfd_settime (this->m_heldTicks, 0, &stop, nullptr);
++	this->m_videoDriver->resumeRendering ();
++    }
++}
++
++void WallpaperApplication::armHeldTicks () {
++    if (this->m_heldTicks < 0) {
++	this->m_heldTicks = timerfd_create (CLOCK_REALTIME, TFD_NONBLOCK | TFD_CLOEXEC);
++    }
++
++    timespec now {};
++    clock_gettime (CLOCK_REALTIME, &now);
++
++    // just after each whole second, so a clock changes when the second does; a clock change (time zone,
++    // suspend, NTP) cancels the timer, see renderHeldTick
++    itimerspec ticks = {};
++    ticks.it_interval.tv_sec = 1;
++    ticks.it_value.tv_sec = now.tv_sec + 1;
++    ticks.it_value.tv_nsec = 20 * 1000 * 1000;
++    timerfd_settime (this->m_heldTicks, TFD_TIMER_ABSTIME | TFD_TIMER_CANCEL_ON_SET, &ticks, nullptr);
++}
++
++void WallpaperApplication::renderHeldTick () {
++    std::vector<int> fds = { this->m_heldTicks };
++
++    if (this->m_control) {
++	fds.push_back (this->m_control->fd ());
++    }
++
++    this->m_videoDriver->waitForEvents (fds, -1);
++
++    uint64_t expirations;
++
++    if (read (this->m_heldTicks, &expirations, sizeof (expirations)) < 0) {
++	if (errno != ECANCELED) {
++	    // woken up by a command or the compositor, not by the clock
++	    if (this->m_videoDriver->closeRequested ()) {
++		this->m_context.state.general.keepRunning = false;
++	    }
++	    return;
++	}
++
++	// the clock jumped: align the ticks again and render right away
++	this->armHeldTicks ();
++    }
++
++    time_t seconds;
++    time (&seconds);
++    const tm* timeinfo = localtime (&seconds);
++    g_Daytime = static_cast<float> ((timeinfo->tm_hour * 60) + timeinfo->tm_min) / (24.0f * 60.0f);
++    g_TimeLast = g_Time = m_videoDriver->getRenderTime ();
++
++    // the sound (if any) keeps fading with what else plays
++    m_audioDriver->update ();
++    m_videoDriver->renderHeldFrame ();
++
++    if (m_videoDriver->closeRequested ()) {
++	sLog.out ("Stop requested by driver");
++	this->m_context.state.general.keepRunning = false;
++    }
++}
++
++void WallpaperApplication::renderHeld (Render::Drivers::Output::OutputViewport* viewport) {
++    m_renderContext->renderHeld (viewport);
++}
++
+ void WallpaperApplication::cleanup () {
+     sLog.out ("Stopping");
+ 
+diff --git a/src/WallpaperEngine/Application/WallpaperApplication.h b/src/WallpaperEngine/Application/WallpaperApplication.h
+index 83f50b6e..2458e3b6 100644
+--- a/src/WallpaperEngine/Application/WallpaperApplication.h
++++ b/src/WallpaperEngine/Application/WallpaperApplication.h
+@@ -4,6 +4,7 @@
+ #include <random>
+ 
+ #include "WallpaperEngine/Application/ApplicationContext.h"
++#include "WallpaperEngine/Application/ControlChannel.h"
+ #include "WallpaperEngine/Assets/AssetLocator.h"
+ 
+ #include "WallpaperEngine/Render/CWallpaper.h"
+@@ -71,6 +72,17 @@ public:
+      * The compositor has shown a frame with the wallpaper's content on the viewport
+      */
+     void framePresented (const Render::Drivers::Output::OutputViewport* viewport);
++    /**
++     * Renders a frame of the held wallpaper on the viewport, shown only if it changed
++     *
++     * @param viewport
++     */
++    void renderHeld (Render::Drivers::Output::OutputViewport* viewport);
++    /**
++     * @return If the wallpaper is held still (eco mode): its animation time stopped and frames are only shown
++     * when they change
++     */
++    [[nodiscard]] bool isHeld () const;
+     /**
+      * Gets the output
+      */
+@@ -160,6 +172,24 @@ private:
+ 
+     void initializePlaylists ();
+     void updatePlaylists ();
++    /**
++     * Runs the commands that came through the control channel
++     */
++    void runCommands ();
++    /**
++     * Holds the wallpaper still, or lets it animate again
++     *
++     * @param hold
++     */
++    void setHeld (bool hold);
++    /**
++     * Waits for the next second (or a command) and renders the held wallpaper
++     */
++    void renderHeldTick ();
++    /**
++     * Starts the held ticks: every second, just after the second changes
++     */
++    void armHeldTicks ();
+     /**
+      * Lowers the render rate to the videos' own frame rate when every wallpaper is a plain video
+      */
+@@ -194,6 +224,13 @@ private:
+     std::unique_ptr<WallpaperEngine::Media::MediaSource> m_mediaSource = nullptr;
+     std::mt19937 m_playlistRng { std::random_device {}() };
+     bool m_isPaused = false;
++    /** Commands from the standard input, see --control */
++    std::unique_ptr<ControlChannel> m_control = nullptr;
++    /** If eco mode was asked for; the wallpaper is held once it has shown its first frame for a moment */
++    bool m_ecoWanted = false;
++    bool m_held = false;
++    /** timerfd for the held ticks */
++    int m_heldTicks = -1;
+     bool m_screenShotTaken = false;
+     uint32_t m_nextFrameScreenshot = 0;
+     std::chrono::steady_clock::time_point m_pauseStart {};
+diff --git a/src/WallpaperEngine/Audio/Drivers/Detectors/AudioPlayingDetector.cpp b/src/WallpaperEngine/Audio/Drivers/Detectors/AudioPlayingDetector.cpp
+index adf60bbc..db014669 100644
+--- a/src/WallpaperEngine/Audio/Drivers/Detectors/AudioPlayingDetector.cpp
++++ b/src/WallpaperEngine/Audio/Drivers/Detectors/AudioPlayingDetector.cpp
+@@ -4,7 +4,11 @@ namespace WallpaperEngine::Audio::Drivers::Detectors {
+ AudioPlayingDetector::AudioPlayingDetector (
+     Application::ApplicationContext& appContext,
+     const Render::Drivers::Detectors::FullScreenDetector& fullscreenDetector
+-) : m_applicationContext (appContext), m_fullscreenDetector (fullscreenDetector) { }
++) : m_muted (appContext.settings.audio.muted), m_applicationContext (appContext),
++    m_fullscreenDetector (fullscreenDetector) { }
++
++/** The wallpaper's sound comes back this long after the other app went quiet */
++static constexpr auto RESUME_DELAY = std::chrono::seconds (2);
+ 
+ bool AudioPlayingDetector::anythingPlaying () const { return this->m_isPlaying; }
+ 
+@@ -16,7 +20,27 @@ const Render::Drivers::Detectors::FullScreenDetector& AudioPlayingDetector::getF
+     return this->m_fullscreenDetector;
+ }
+ 
+-void AudioPlayingDetector::setIsPlaying (const bool newState) { this->m_isPlaying = newState; }
++void AudioPlayingDetector::setIsPlaying (const bool newState) {
++    this->m_isPlaying = newState;
++
++    if (newState) {
++	this->m_lastPlayingAt = std::chrono::steady_clock::now ().time_since_epoch ().count ();
++    }
++}
++
++void AudioPlayingDetector::setMuted (const bool muted) { this->m_muted = muted; }
++
++bool AudioPlayingDetector::wantsSilence () const {
++    if (this->m_muted || this->m_isPlaying) {
++	return true;
++    }
++
++    const int64_t lastPlayingAt = this->m_lastPlayingAt;
++
++    return lastPlayingAt != 0
++	&& std::chrono::steady_clock::now ().time_since_epoch ()
++	    < std::chrono::steady_clock::duration (lastPlayingAt) + RESUME_DELAY;
++}
+ 
+ void AudioPlayingDetector::update () { }
+ 
+diff --git a/src/WallpaperEngine/Audio/Drivers/Detectors/AudioPlayingDetector.h b/src/WallpaperEngine/Audio/Drivers/Detectors/AudioPlayingDetector.h
+index e7e4776a..7b3d410a 100644
+--- a/src/WallpaperEngine/Audio/Drivers/Detectors/AudioPlayingDetector.h
++++ b/src/WallpaperEngine/Audio/Drivers/Detectors/AudioPlayingDetector.h
+@@ -1,5 +1,8 @@
+ #pragma once
+ 
++#include <atomic>
++#include <chrono>
++
+ #include "WallpaperEngine/Application/ApplicationContext.h"
+ #include "WallpaperEngine/Render/Drivers/Detectors/FullScreenDetector.h"
+ 
+@@ -37,6 +40,18 @@ namespace Audio::Drivers::Detectors {
+ 	 */
+ 	void setIsPlaying (bool newState);
+ 
++	/**
++	 * Fades the wallpaper's sound out (or back in) no matter what else is playing
++	 *
++	 * @param muted
++	 */
++	void setMuted (bool muted);
++	/**
++	 * @return If the wallpaper's sound should be faded out: it's muted, something else is playing, or something
++	 * else stopped playing less than RESUME_DELAY ago
++	 */
++	[[nodiscard]] bool wantsSilence () const;
++
+ 	/**
+ 	 * Checks if any audio is playing and updates state accordingly
+ 	 */
+@@ -53,7 +68,11 @@ namespace Audio::Drivers::Detectors {
+ 	[[nodiscard]] const Render::Drivers::Detectors::FullScreenDetector& getFullscreenDetector () const;
+ 
+     private:
+-	bool m_isPlaying = false;
++	/** Read by the audio thread */
++	std::atomic<bool> m_isPlaying = false;
++	std::atomic<bool> m_muted = false;
++	/** When something else was last seen playing (steady clock, nanoseconds) */
++	std::atomic<int64_t> m_lastPlayingAt = 0;
+ 
+ 	Application::ApplicationContext& m_applicationContext;
+ 	const Render::Drivers::Detectors::FullScreenDetector& m_fullscreenDetector;
+diff --git a/src/WallpaperEngine/Audio/Drivers/Detectors/GainRamp.h b/src/WallpaperEngine/Audio/Drivers/Detectors/GainRamp.h
+new file mode 100644
+index 00000000..2808e6b6
+--- /dev/null
++++ b/src/WallpaperEngine/Audio/Drivers/Detectors/GainRamp.h
+@@ -0,0 +1,40 @@
++#pragma once
++
++#include <algorithm>
++
++namespace WallpaperEngine::Audio::Drivers::Detectors {
++/**
++ * Fades the wallpaper's sound in and out instead of cutting it: the gain moves towards 0 (silence) or 1 over
++ * FADE_SECONDS. Each consumer (the audio callback, every video) keeps its own ramp.
++ */
++class GainRamp {
++public:
++    static constexpr float FADE_SECONDS = 0.5f;
++
++    /**
++     * @param silence If the sound should be faded out
++     * @param seconds The time since the previous step
++     * @return The gain to play at, 0 to 1
++     */
++    float step (bool silence, float seconds) {
++	const float target = silence ? 0.0f : 1.0f;
++
++	// the first step starts at the target, so a wallpaper started muted never plays a bit of sound
++	if (!this->m_started) {
++	    this->m_started = true;
++	    this->m_gain = target;
++	}
++
++	const float change = seconds / FADE_SECONDS;
++	this->m_gain = target > this->m_gain ? std::min (target, this->m_gain + change)
++					     : std::max (target, this->m_gain - change);
++	return this->m_gain;
++    }
++
++    [[nodiscard]] float gain () const { return this->m_gain; }
++
++private:
++    bool m_started = false;
++    float m_gain = 1.0f;
++};
++} // namespace WallpaperEngine::Audio::Drivers::Detectors
+diff --git a/src/WallpaperEngine/Audio/Drivers/Detectors/PulseAudioPlayingDetector.cpp b/src/WallpaperEngine/Audio/Drivers/Detectors/PulseAudioPlayingDetector.cpp
+index 3d32b189..e101f868 100644
+--- a/src/WallpaperEngine/Audio/Drivers/Detectors/PulseAudioPlayingDetector.cpp
++++ b/src/WallpaperEngine/Audio/Drivers/Detectors/PulseAudioPlayingDetector.cpp
+@@ -2,35 +2,54 @@
+ #include "WallpaperEngine/Logging/Log.h"
+ 
+ #include <unistd.h>
++#include <vector>
+ 
+ namespace WallpaperEngine::Audio::Drivers::Detectors {
++/** What one scan of the playing streams found */
++struct PlayingScan {
++    bool playing = false;
++    /** Clients of audible streams whose process isn't known from the stream itself */
++    std::vector<uint32_t> clients = {};
++};
++
++/**
++ * @return If the stream belongs to another app: not this process, and not another wallpaper either (two
++ * wallpapers with sound on two screens would otherwise silence each other for good)
++ */
++static bool isOtherApp (const pa_proplist* proplist) {
++    const char* process = pa_proplist_gets (proplist, PA_PROP_APPLICATION_PROCESS_ID);
++    const char* binary = pa_proplist_gets (proplist, PA_PROP_APPLICATION_PROCESS_BINARY);
++
++    return process != nullptr && strtol (process, nullptr, 10) != getpid ()
++	&& (binary == nullptr || strcmp (binary, "linux-wallpaperengine") != 0);
++}
++
+ void sinkInputInfoCallback (pa_context* context, const pa_sink_input_info* info, int eol, void* userdata) {
+-    auto* detector = static_cast<PulseAudioPlayingDetector*> (userdata);
++    auto* scan = static_cast<PlayingScan*> (userdata);
+ 
+-    if (info == nullptr) {
++    if (info == nullptr || info->proplist == nullptr) {
+ 	return;
+     }
+ 
+-    if (info->proplist == nullptr) {
++    // paused (corked) and muted streams don't count, players keep them around while paused
++    if (info->corked || info->mute || pa_cvolume_avg (&info->volume) == PA_VOLUME_MUTED) {
+ 	return;
+     }
+ 
+-    // get processid
+-    const char* value = pa_proplist_gets (info->proplist, PA_PROP_APPLICATION_PROCESS_ID);
+-
+-    if (value && strtol (value, nullptr, 10) != getpid () && pa_cvolume_avg (&info->volume) != PA_VOLUME_MUTED) {
+-	detector->setIsPlaying (true);
++    // native PipeWire streams (SDL, browsers) only carry the process id on their client
++    if (pa_proplist_gets (info->proplist, PA_PROP_APPLICATION_PROCESS_ID) != nullptr) {
++	scan->playing |= isOtherApp (info->proplist);
++    } else if (info->client != PA_INVALID_INDEX) {
++	scan->clients.push_back (info->client);
+     }
+ }
+ 
+-void defaultSinkInfoCallback (pa_context* context, const pa_server_info* info, void* userdata) {
+-    if (info == nullptr) {
+-	return;
+-    }
++void clientInfoCallback (pa_context* context, const pa_client_info* info, int eol, void* userdata) {
++    auto* scan = static_cast<PlayingScan*> (userdata);
+ 
+-    pa_operation* op = pa_context_get_sink_input_info_list (context, sinkInputInfoCallback, userdata);
+-
+-    pa_operation_unref (op);
++    if (info != nullptr && info->proplist != nullptr) {
++	scan->playing |= isOtherApp (info->proplist);
++    }
+ }
+ 
+ PulseAudioPlayingDetector::PulseAudioPlayingDetector (
+@@ -68,17 +87,37 @@ void PulseAudioPlayingDetector::update () {
+ 	return this->setIsPlaying (true);
+     }
+ 
+-    // reset playing state
+-    this->setIsPlaying (false);
++    // a server round trip every frame is wasted work, sound starting a few frames late doesn't matter
++    const auto now = std::chrono::steady_clock::now ();
++    if (now - this->m_lastCheck < std::chrono::milliseconds (250)) {
++	return;
++    }
++    this->m_lastCheck = now;
++
++    PlayingScan scan;
++
++    this->wait (pa_context_get_sink_input_info_list (this->m_context, sinkInputInfoCallback, &scan));
++
++    for (const uint32_t client : scan.clients) {
++	if (scan.playing) {
++	    break;
++	}
++
++	this->wait (pa_context_get_client_info (this->m_context, client, clientInfoCallback, &scan));
++    }
+ 
+-    // start discovery of sinks
+-    pa_operation* op = pa_context_get_server_info (this->m_context, defaultSinkInfoCallback, this);
++    this->setIsPlaying (scan.playing);
++}
++
++void PulseAudioPlayingDetector::wait (pa_operation* operation) const {
++    if (operation == nullptr) {
++	return;
++    }
+ 
+-    // wait until all the operations are done
+-    while (pa_operation_get_state (op) == PA_OPERATION_RUNNING) {
++    while (pa_operation_get_state (operation) == PA_OPERATION_RUNNING) {
+ 	pa_mainloop_iterate (this->m_mainloop, 1, nullptr);
+     }
+ 
+-    pa_operation_unref (op);
++    pa_operation_unref (operation);
+ }
+ } // namespace WallpaperEngine::Audio::Drivers::Detectors
+\ No newline at end of file
+diff --git a/src/WallpaperEngine/Audio/Drivers/Detectors/PulseAudioPlayingDetector.h b/src/WallpaperEngine/Audio/Drivers/Detectors/PulseAudioPlayingDetector.h
+index 8abdf978..31a07377 100644
+--- a/src/WallpaperEngine/Audio/Drivers/Detectors/PulseAudioPlayingDetector.h
++++ b/src/WallpaperEngine/Audio/Drivers/Detectors/PulseAudioPlayingDetector.h
+@@ -16,8 +16,12 @@ public:
+     void update () override;
+ 
+ private:
++    /** Runs the main loop until the operation is done */
++    void wait (pa_operation* operation) const;
++
+     pa_mainloop* m_mainloop = nullptr;
+     pa_mainloop_api* m_mainloopApi = nullptr;
+     pa_context* m_context = nullptr;
++    std::chrono::steady_clock::time_point m_lastCheck = {};
+ };
+ } // namespace WallpaperEngine::Audio::Drivers::Detectors
+diff --git a/src/WallpaperEngine/Audio/Drivers/SDLAudioDriver.cpp b/src/WallpaperEngine/Audio/Drivers/SDLAudioDriver.cpp
+index 297a6069..3f55901c 100644
+--- a/src/WallpaperEngine/Audio/Drivers/SDLAudioDriver.cpp
++++ b/src/WallpaperEngine/Audio/Drivers/SDLAudioDriver.cpp
+@@ -12,11 +12,19 @@ void audio_callback (void* userdata, uint8_t* streamData, int length) {
+ 
+     memset (streamData, 0, length);
+ 
+-    // if audio is playing do not do anything here!
+-    if (driver->getAudioDetector ().anythingPlaying ()) {
++    // fade out while something else plays (or the wallpaper is muted) instead of cutting the sound
++    const SDL_AudioSpec& spec = driver->getSpec ();
++    const float seconds
++	= static_cast<float> (length) / (SDL_AUDIO_BITSIZE (spec.format) / 8 * spec.channels * spec.freq);
++    const float gain = driver->m_ramp.step (driver->getAudioDetector ().wantsSilence (), seconds);
++    driver->m_gain = gain;
++
++    if (gain <= 0.0f) {
+ 	return;
+     }
+ 
++    const int volume = static_cast<int> (driver->getApplicationContext ().state.audio.volume * gain + 0.5f);
++
+     SDL_LockMutex (driver->getStreamMutex ());
+ 
+     for (const auto& buffer : driver->getStreams () | std::views::values) {
+@@ -59,8 +67,7 @@ void audio_callback (void* userdata, uint8_t* streamData, int length) {
+ 
+ 	    // mix the audio
+ 	    SDL_MixAudioFormat (
+-		streamDataPointer, &buffer->audio_buf[buffer->audio_buf_index], driver->getSpec ().format, len1,
+-		driver->getApplicationContext ().state.audio.volume
++		streamDataPointer, &buffer->audio_buf[buffer->audio_buf_index], driver->getSpec ().format, len1, volume
+ 	    );
+ 
+ 	    streamLength -= len1;
+@@ -161,4 +168,24 @@ int SDLAudioDriver::getChannels () const { return this->m_audioSpec.channels; }
+ 
+ const SDL_AudioSpec& SDLAudioDriver::getSpec () const { return this->m_audioSpec; }
+ 
+-SDL_mutex* SDLAudioDriver::getStreamMutex () const { return this->m_streamListMutex; }
+\ No newline at end of file
++SDL_mutex* SDLAudioDriver::getStreamMutex () const { return this->m_streamListMutex; }
++
++void SDLAudioDriver::update () {
++    AudioDriver::update ();
++
++    if (!this->m_initialized) {
++	return;
++    }
++
++    SDL_LockMutex (this->m_streamListMutex);
++    const bool haveStreams = !this->m_streams.empty ();
++    SDL_UnlockMutex (this->m_streamListMutex);
++
++    // a paused device doesn't run the callback, so the fade-in starts from silence once it's resumed
++    const bool idle = !haveStreams || (this->getAudioDetector ().wantsSilence () && this->m_gain <= 0.0f);
++
++    if (idle != this->m_devicePaused) {
++	SDL_PauseAudioDevice (this->m_deviceID, idle ? 1 : 0);
++	this->m_devicePaused = idle;
++    }
++}
+\ No newline at end of file
+diff --git a/src/WallpaperEngine/Audio/Drivers/SDLAudioDriver.h b/src/WallpaperEngine/Audio/Drivers/SDLAudioDriver.h
+index b0631886..523b16e9 100644
+--- a/src/WallpaperEngine/Audio/Drivers/SDLAudioDriver.h
++++ b/src/WallpaperEngine/Audio/Drivers/SDLAudioDriver.h
+@@ -5,6 +5,9 @@
+ 
+ #include "WallpaperEngine/Audio/AudioStream.h"
+ #include "WallpaperEngine/Audio/Drivers/AudioDriver.h"
++#include "WallpaperEngine/Audio/Drivers/Detectors/GainRamp.h"
++
++#include <atomic>
+ 
+ #include <SDL.h>
+ 
+@@ -54,6 +57,16 @@ public:
+ 
+     [[nodiscard]] SDL_mutex* getStreamMutex () const;
+ 
++    /**
++     * Stops the audio device while there's nothing to hear (no sounds, or faded out) so the sound card can go idle
++     */
++    void update () override;
++
++    /** Fade of the wallpaper's sound, only stepped by the audio callback */
++    Detectors::GainRamp m_ramp;
++    /** The ramp's gain, for the main thread */
++    std::atomic<float> m_gain = 1.0f;
++
+ private:
+     /** The mutex lock used to access the stream list mutex */
+     SDL_mutex* m_streamListMutex;
+@@ -63,6 +76,7 @@ private:
+     SDL_AudioDeviceID m_deviceID;
+     /** If the driver is initialized or not */
+     bool m_initialized = false;
++    bool m_devicePaused = false;
+     /** The sound output configuration */
+     SDL_AudioSpec m_audioSpec {};
+     /** All the playable steams */
+diff --git a/src/WallpaperEngine/Render/Drivers/FrameHash.h b/src/WallpaperEngine/Render/Drivers/FrameHash.h
+new file mode 100644
+index 00000000..77972d8f
+--- /dev/null
++++ b/src/WallpaperEngine/Render/Drivers/FrameHash.h
+@@ -0,0 +1,36 @@
++#pragma once
++
++#include <GL/glew.h>
++#include <cstdint>
++#include <glm/vec4.hpp>
++#include <vector>
++
++namespace WallpaperEngine::Render::Drivers {
++/**
++ * Reads the pixels of an area of a framebuffer (RGBA, bottom row first) and hashes them, to tell if a held
++ * wallpaper's frame changed. Every pixel counts: a clock's seconds are a few pixels of a big frame.
++ *
++ * @param framebuffer
++ * @param area x, y, width, height
++ * @param pixels Where the pixels are read to (reused between calls)
++ * @return The hash, never 0 (0 means "no frame shown yet")
++ */
++inline uint64_t hashFramebuffer (GLuint framebuffer, const glm::ivec4& area, std::vector<uint8_t>& pixels) {
++    // whole 64-bit words, the tail of an odd-sized area stays zero
++    pixels.assign ((static_cast<size_t> (area.z) * area.w * 4 + 7) / 8 * 8, 0);
++
++    glBindFramebuffer (GL_READ_FRAMEBUFFER, framebuffer);
++    glPixelStorei (GL_PACK_ALIGNMENT, 1);
++    glReadPixels (area.x, area.y, area.z, area.w, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data ());
++
++    // FNV-1a over 64-bit words
++    uint64_t hash = 14695981039346656037ull;
++    const auto* words = reinterpret_cast<const uint64_t*> (pixels.data ());
++
++    for (size_t i = 0, count = pixels.size () / 8; i < count; i++) {
++	hash = (hash ^ words[i]) * 1099511628211ull;
++    }
++
++    return hash | 1;
++}
++} // namespace WallpaperEngine::Render::Drivers
+diff --git a/src/WallpaperEngine/Render/Drivers/GLFWOpenGLDriver.cpp b/src/WallpaperEngine/Render/Drivers/GLFWOpenGLDriver.cpp
+index 2e29ff0f..16221e48 100644
+--- a/src/WallpaperEngine/Render/Drivers/GLFWOpenGLDriver.cpp
++++ b/src/WallpaperEngine/Render/Drivers/GLFWOpenGLDriver.cpp
+@@ -1,6 +1,7 @@
+ #include "GLFWOpenGLDriver.h"
+ #include "VideoFactories.h"
+ #include "WallpaperEngine/Logging/Log.h"
++#include "WallpaperEngine/Render/Drivers/FrameHash.h"
+ #include "WallpaperEngine/Render/Drivers/Output/GLFWWindowOutput.h"
+ #ifdef ENABLE_X11
+ #include "WallpaperEngine/Render/Drivers/Output/X11Output.h"
+@@ -11,6 +12,7 @@
+ 
+ #include <GLFW/glfw3native.h>
+ 
++#include <cstdio>
+ #include <unistd.h>
+ 
+ using namespace WallpaperEngine::Render::Drivers;
+@@ -50,7 +52,7 @@ GLFWOpenGLDriver::GLFWOpenGLDriver (const char* windowTitle, ApplicationContext&
+     // create window, size doesn't matter as long as we don't show it. A streamed window is never shown, so its
+     // framebuffer keeps the size it's created with
+     glm::ivec2 windowSize = { 640, 480 };
+-    if (!context.settings.render.streamTarget.empty ()) {
++    if (context.rendersOffscreen ()) {
+ 	windowSize = { context.settings.render.window.geometry.z, context.settings.render.window.geometry.w };
+     }
+     this->m_window = glfwCreateWindow (windowSize.x, windowSize.y, windowTitle, nullptr, nullptr);
+@@ -67,13 +69,16 @@ GLFWOpenGLDriver::GLFWOpenGLDriver (const char* windowTitle, ApplicationContext&
+ 	sLog.error ("Failed to initialize GLEW: ", glewGetErrorString (result));
+     }
+ 
+-    if (!context.settings.render.streamTarget.empty ()) {
++    if (context.rendersOffscreen ()) {
+ 	if (context.settings.render.mode != ApplicationContext::EXPLICIT_WINDOW) {
+-	    sLog.exception ("--stream needs --window to know the size to render at");
++	    sLog.exception ("--stream and --frame-file need --window to know the size to render at");
+ 	}
+ 
+ 	// the window is never shown, nothing must wait for it to be presented
+ 	glfwSwapInterval (0);
++    }
++
++    if (!context.settings.render.streamTarget.empty ()) {
+ 	this->m_stream = std::make_unique<FrameStream> (
+ 	    context.settings.render.streamTarget, context.settings.render.maximumFPS
+ 	);
+@@ -99,7 +104,7 @@ GLFWOpenGLDriver::~GLFWOpenGLDriver () { glfwTerminate (); }
+ 
+ Output::Output& GLFWOpenGLDriver::getOutput () { return *this->m_output; }
+ 
+-float GLFWOpenGLDriver::getRenderTime () const { return static_cast<float> (glfwGetTime ()); }
++float GLFWOpenGLDriver::getClockTime () const { return static_cast<float> (glfwGetTime ()); }
+ 
+ bool GLFWOpenGLDriver::closeRequested () { return glfwWindowShouldClose (this->m_window); }
+ 
+@@ -129,12 +134,18 @@ void GLFWOpenGLDriver::dispatchEventQueue () {
+     // the target rate can drop below --fps while only videos are shown, so re-read it every frame
+     const float minimumTime = 1.0f / this->m_context.getTargetFrameRate ();
+     // get the start time of the frame
+-    startTime = this->getRenderTime ();
++    startTime = this->getClockTime ();
+     // clear the screen
+     glClear (GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+ 
+     for (const auto& [screen, viewport] : this->m_output->getViewports ()) {
+ 	this->getApp ().update (viewport);
++
++	// nothing waits for a hidden window, a frame with content counts as shown (an --eco wallpaper is held
++	// a moment after its first frame)
++	if (viewport->swappingContent) {
++	    this->getApp ().framePresented (viewport);
++	}
+     }
+ 
+     // read the full texture into the image
+@@ -177,7 +188,7 @@ void GLFWOpenGLDriver::dispatchEventQueue () {
+     // increase frame counter
+     this->m_frameCounter++;
+     // get the end time of the frame
+-    endTime = this->getRenderTime ();
++    endTime = this->getClockTime ();
+ 
+     // ensure the frame time is correct to not overrun FPS
+     if ((endTime - startTime) < minimumTime) {
+@@ -185,6 +196,76 @@ void GLFWOpenGLDriver::dispatchEventQueue () {
+     }
+ }
+ 
++void GLFWOpenGLDriver::renderHeldFrame () {
++    // a new frame number, so the scene is rendered again instead of reusing the last frame
++    this->m_frameCounter++;
++
++    glClear (GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
++
++    for (const auto& [screen, viewport] : this->m_output->getViewports ()) {
++	this->getApp ().update (viewport);
++    }
++
++    const glm::ivec4 area = { 0, 0, this->m_output->getFullWidth (), this->m_output->getFullHeight () };
++    const uint64_t hash = hashFramebuffer (0, area, this->m_heldPixels);
++
++    if (hash != this->m_heldFrameHash) {
++	this->m_heldFrameHash = hash;
++
++	if (!this->m_context.settings.render.frameFile.empty ()) {
++	    this->writeFrameFile ();
++	} else if (this->m_stream != nullptr) {
++	    this->m_stream->pushFrame (area.z, area.w);
++	} else {
++	    glfwSwapBuffers (this->m_window);
++	}
++    }
++
++    glfwPollEvents ();
++}
++
++void GLFWOpenGLDriver::forgetHeldFrames () { this->m_heldFrameHash = 0; }
++
++void GLFWOpenGLDriver::writeFrameFile () const {
++    const int width = this->m_output->getFullWidth ();
++    const int height = this->m_output->getFullHeight ();
++    const std::string& path = this->m_context.settings.render.frameFile;
++    const std::string temporary = path + ".tmp";
++
++    // RGBA bottom row first -> RGB top row first
++    std::vector<uint8_t> rgb (static_cast<size_t> (width) * height * 3);
++
++    for (int y = 0; y < height; y++) {
++	const uint8_t* from = &this->m_heldPixels[static_cast<size_t> (height - 1 - y) * width * 4];
++	uint8_t* to = &rgb[static_cast<size_t> (y) * width * 3];
++
++	for (int x = 0; x < width; x++, from += 4, to += 3) {
++	    to[0] = from[0];
++	    to[1] = from[1];
++	    to[2] = from[2];
++	}
++    }
++
++    FILE* file = fopen (temporary.c_str (), "wb");
++
++    if (file == nullptr) {
++	sLog.error ("Cannot write the frame to ", temporary);
++	return;
++    }
++
++    fprintf (file, "P6\n%d %d\n255\n", width, height);
++    const bool written = fwrite (rgb.data (), 1, rgb.size (), file) == rgb.size ();
++    fclose (file);
++
++    // readers never see half a frame
++    if (!written || rename (temporary.c_str (), path.c_str ()) != 0) {
++	sLog.error ("Cannot write the frame to ", path);
++	return;
++    }
++
++    sLog.out ("Frame written");
++}
++
+ void* GLFWOpenGLDriver::getProcAddress (const char* name) const {
+     return reinterpret_cast<void*> (glfwGetProcAddress (name));
+ }
+diff --git a/src/WallpaperEngine/Render/Drivers/GLFWOpenGLDriver.h b/src/WallpaperEngine/Render/Drivers/GLFWOpenGLDriver.h
+index a70ffa01..c7398fa2 100644
+--- a/src/WallpaperEngine/Render/Drivers/GLFWOpenGLDriver.h
++++ b/src/WallpaperEngine/Render/Drivers/GLFWOpenGLDriver.h
+@@ -24,7 +24,7 @@ public:
+     ~GLFWOpenGLDriver () override;
+ 
+     [[nodiscard]] Output::Output& getOutput () override;
+-    [[nodiscard]] float getRenderTime () const override;
++    [[nodiscard]] float getClockTime () const override;
+     bool closeRequested () override;
+     void resizeWindow (glm::ivec2 size) override;
+     void resizeWindow (glm::ivec4 sizeandpos) override;
+@@ -33,6 +33,8 @@ public:
+     [[nodiscard]] glm::ivec2 getFramebufferSize () const override;
+     [[nodiscard]] uint32_t getFrameCounter () const override;
+     void dispatchEventQueue () override;
++    void renderHeldFrame () override;
++    void forgetHeldFrames () override;
+     [[nodiscard]] void* getProcAddress (const char* name) const override;
+ 
+     GLFWwindow* getWindow () const;
+@@ -44,5 +46,11 @@ private:
+     GLFWwindow* m_window = nullptr;
+     uint32_t m_frameCounter = 0;
+     std::unique_ptr<FrameStream> m_stream = nullptr;
++    /** Hash of the last frame shown while held, see hashFramebuffer */
++    uint64_t m_heldFrameHash = 0;
++    std::vector<uint8_t> m_heldPixels = {};
++
++    /** Writes the frame in m_heldPixels to --frame-file */
++    void writeFrameFile () const;
+ };
+ } // namespace WallpaperEngine::Render::Drivers
+\ No newline at end of file
+diff --git a/src/WallpaperEngine/Render/Drivers/Output/GLFWWindowOutput.cpp b/src/WallpaperEngine/Render/Drivers/Output/GLFWWindowOutput.cpp
+index 5e9a4952..e07e2471 100644
+--- a/src/WallpaperEngine/Render/Drivers/Output/GLFWWindowOutput.cpp
++++ b/src/WallpaperEngine/Render/Drivers/Output/GLFWWindowOutput.cpp
+@@ -15,7 +15,7 @@ GLFWWindowOutput::GLFWWindowOutput (ApplicationContext& context, VideoDriver& dr
+     }
+ 
+     // window should be visible, unless the frames are streamed somewhere else
+-    if (this->m_context.settings.render.streamTarget.empty ()) {
++    if (!this->m_context.rendersOffscreen ()) {
+ 	driver.showWindow ();
+     }
+ 
+diff --git a/src/WallpaperEngine/Render/Drivers/Output/OutputViewport.h b/src/WallpaperEngine/Render/Drivers/Output/OutputViewport.h
+index a0fba664..1b924e48 100644
+--- a/src/WallpaperEngine/Render/Drivers/Output/OutputViewport.h
++++ b/src/WallpaperEngine/Render/Drivers/Output/OutputViewport.h
+@@ -21,6 +21,8 @@ public:
+     bool single;
+     /** Whether the frame being swapped shows the wallpaper's content (set by the render context before swapping) */
+     bool swappingContent = false;
++    /** Hash of the last frame shown while the wallpaper is held (see RenderContext::renderHeld), 0 if unknown */
++    uint64_t heldFrameHash = 0;
+ 
+     /**
+      * Activates output's context for drawing
+diff --git a/src/WallpaperEngine/Render/Drivers/Output/WaylandOutputViewport.cpp b/src/WallpaperEngine/Render/Drivers/Output/WaylandOutputViewport.cpp
+index 8c0c13a4..0cea8fea 100644
+--- a/src/WallpaperEngine/Render/Drivers/Output/WaylandOutputViewport.cpp
++++ b/src/WallpaperEngine/Render/Drivers/Output/WaylandOutputViewport.cpp
+@@ -101,6 +101,11 @@ static void surfaceFrameCallback (void* data, struct wl_callback* cb, uint32_t t
+     if (viewport->callbackHasContent) {
+ 	viewport->getDriver ()->getApp ().framePresented (viewport);
+     }
++    // a held wallpaper is rendered on its own schedule (WallpaperApplication::renderHeld), not as fast as the
++    // compositor asks
++    if (viewport->getDriver ()->getApp ().isHeld ()) {
++	return;
++    }
+     viewport->rendering = true;
+     viewport->getDriver ()->getApp ().update (viewport);
+     viewport->rendering = false;
+@@ -268,6 +273,11 @@ void WaylandOutputViewport::swapOutput () {
+     this->callbackInitialized = true;
+ 
+     this->makeCurrent ();
++    // a held wallpaper can show a frame before the compositor answered the last one (it doesn't answer hidden
++    // surfaces); keep one request, or two chains of frames would run once rendering resumes
++    if (frameCallback != nullptr) {
++	wl_callback_destroy (frameCallback);
++    }
+     frameCallback = wl_surface_frame (surface);
+     callbackHasContent = swappingContent;
+     wl_callback_add_listener (frameCallback, &frameListener, this);
+diff --git a/src/WallpaperEngine/Render/Drivers/VideoDriver.cpp b/src/WallpaperEngine/Render/Drivers/VideoDriver.cpp
+index 0000c355..de11e742 100644
+--- a/src/WallpaperEngine/Render/Drivers/VideoDriver.cpp
++++ b/src/WallpaperEngine/Render/Drivers/VideoDriver.cpp
+@@ -1,5 +1,7 @@
+ #include "VideoDriver.h"
+ 
++#include <poll.h>
++
+ using namespace WallpaperEngine::Input;
+ using namespace WallpaperEngine::Render::Drivers;
+ 
+@@ -10,4 +12,38 @@ wl_display* VideoDriver::getWaylandDisplay () const { return nullptr; }
+ 
+ WallpaperApplication& VideoDriver::getApp () const { return this->m_app; }
+ 
+-InputContext& VideoDriver::getInputContext () { return this->m_inputContext; }
+\ No newline at end of file
++InputContext& VideoDriver::getInputContext () { return this->m_inputContext; }
++
++float VideoDriver::getRenderTime () const {
++    return (this->m_timeHeld ? this->m_heldAt : this->getClockTime ()) - this->m_heldFor;
++}
++
++void VideoDriver::holdTime (bool hold) {
++    if (hold == this->m_timeHeld) {
++	return;
++    }
++
++    if (hold) {
++	this->m_heldAt = this->getClockTime ();
++    } else {
++	this->m_heldFor += this->getClockTime () - this->m_heldAt;
++    }
++
++    this->m_timeHeld = hold;
++}
++
++void VideoDriver::waitForEvents (const std::vector<int>& fds, int timeoutMs) {
++    std::vector<pollfd> pfds;
++
++    for (const int fd : fds) {
++	pfds.push_back ({ .fd = fd, .events = POLLIN, .revents = 0 });
++    }
++
++    poll (pfds.data (), pfds.size (), timeoutMs);
++}
++
++void VideoDriver::renderHeldFrame () { this->dispatchEventQueue (); }
++
++void VideoDriver::forgetHeldFrames () { }
++
++void VideoDriver::resumeRendering () { }
+diff --git a/src/WallpaperEngine/Render/Drivers/VideoDriver.h b/src/WallpaperEngine/Render/Drivers/VideoDriver.h
+index a4d57f6c..fc9af6ca 100644
+--- a/src/WallpaperEngine/Render/Drivers/VideoDriver.h
++++ b/src/WallpaperEngine/Render/Drivers/VideoDriver.h
+@@ -6,6 +6,7 @@
+ #include <glm/vec2.hpp>
+ #include <glm/vec4.hpp>
+ #include <string>
++#include <vector>
+ 
+ struct wl_display;
+ 
+@@ -32,10 +33,40 @@ public:
+      * @return The current output in use
+      */
+     [[nodiscard]] virtual Output::Output& getOutput () = 0;
++    /**
++     * @return The animation time: the time since the driver started, minus the time it was held (see holdTime)
++     */
++    [[nodiscard]] float getRenderTime () const;
+     /**
+      * @return The time that has passed since the driver started
+      */
+-    [[nodiscard]] virtual float getRenderTime () const = 0;
++    [[nodiscard]] virtual float getClockTime () const = 0;
++    /**
++     * Stops the animation time (getRenderTime) where it is, or lets it run again from there
++     *
++     * @param hold
++     */
++    void holdTime (bool hold);
++    /**
++     * Waits until one of the given file descriptors can be read or timeoutMs passes,
++     * handling the driver's own events in the meantime (but not rendering)
++     *
++     * @param fds
++     * @param timeoutMs -1 waits forever
++     */
++    virtual void waitForEvents (const std::vector<int>& fds, int timeoutMs);
++    /**
++     * Renders a frame of a held wallpaper and only shows it if it looks different from the last frame shown
++     */
++    virtual void renderHeldFrame ();
++    /**
++     * Makes the next held frame be shown even if it looks the same
++     */
++    virtual void forgetHeldFrames ();
++    /**
++     * Starts rendering continuously again after the wallpaper was held
++     */
++    virtual void resumeRendering ();
+     /**
+      * @return If a close was requested by the OS
+      */
+@@ -88,6 +119,11 @@ public:
+     [[nodiscard]] Input::InputContext& getInputContext ();
+ 
+ private:
++    bool m_timeHeld = false;
++    /** getClockTime when the time was held */
++    float m_heldAt = 0.0f;
++    /** All the time spent held so far */
++    float m_heldFor = 0.0f;
+     /** App that owns this driver */
+     WallpaperApplication& m_app;
+     Input::InputContext m_inputContext;
+diff --git a/src/WallpaperEngine/Render/Drivers/WaylandOpenGLDriver.cpp b/src/WallpaperEngine/Render/Drivers/WaylandOpenGLDriver.cpp
+index c5b84abd..dea2060f 100644
+--- a/src/WallpaperEngine/Render/Drivers/WaylandOpenGLDriver.cpp
++++ b/src/WallpaperEngine/Render/Drivers/WaylandOpenGLDriver.cpp
+@@ -17,6 +17,7 @@ extern "C" {
+ #undef static
+ 
+ #include <algorithm>
++#include <poll.h>
+ #include <string.h>
+ #include <unistd.h>
+ 
+@@ -414,7 +415,7 @@ void WaylandOpenGLDriver::dispatchEventQueue () {
+     // the target rate can drop below --fps while only videos are shown, so re-read it every frame
+     const float minimumTime = 1.0f / this->m_context.getTargetFrameRate ();
+     // get the start time of the frame
+-    startTime = this->getRenderTime ();
++    startTime = this->getClockTime ();
+ 
+     if (wl_display_dispatch (m_waylandContext.display) == -1) {
+ 	m_requestedExit = true;
+@@ -422,7 +423,7 @@ void WaylandOpenGLDriver::dispatchEventQueue () {
+ 
+     m_frameCounter++;
+ 
+-    endTime = this->getRenderTime ();
++    endTime = this->getClockTime ();
+ 
+     // ensure the frame time is correct to not overrun FPS
+     if ((endTime - startTime) < minimumTime) {
+@@ -430,9 +431,68 @@ void WaylandOpenGLDriver::dispatchEventQueue () {
+     }
+ }
+ 
++void WaylandOpenGLDriver::waitForEvents (const std::vector<int>& fds, int timeoutMs) {
++    wl_display* display = this->m_waylandContext.display;
++
++    // the usual dance to wait on the Wayland socket together with other file descriptors
++    while (wl_display_prepare_read (display) != 0) {
++	wl_display_dispatch_pending (display);
++    }
++
++    wl_display_flush (display);
++
++    std::vector<pollfd> pfds = { { .fd = wl_display_get_fd (display), .events = POLLIN, .revents = 0 } };
++
++    for (const int fd : fds) {
++	pfds.push_back ({ .fd = fd, .events = POLLIN, .revents = 0 });
++    }
++
++    if (poll (pfds.data (), pfds.size (), timeoutMs) > 0 && (pfds[0].revents & POLLIN)) {
++	wl_display_read_events (display);
++    } else {
++	wl_display_cancel_read (display);
++    }
++
++    if (wl_display_dispatch_pending (display) == -1) {
++	this->m_requestedExit = true;
++    }
++}
++
++void WaylandOpenGLDriver::renderHeldFrame () {
++    // a new frame number, so the scene is rendered again instead of reusing the last frame
++    this->m_frameCounter++;
++
++    for (Output::WaylandOutputViewport* viewport : this->m_screens) {
++	// only screens that already show something: the others start once their surface is configured
++	if (!viewport->callbackInitialized) {
++	    continue;
++	}
++
++	this->getApp ().renderHeld (viewport);
++    }
++}
++
++void WaylandOpenGLDriver::forgetHeldFrames () {
++    for (Output::WaylandOutputViewport* viewport : this->m_screens) {
++	viewport->heldFrameHash = 0;
++    }
++}
++
++void WaylandOpenGLDriver::resumeRendering () {
++    // frames are rendered when the compositor asks for the next one; a screen without a pending request
++    // would never ask again, so render it once to start over
++    for (Output::WaylandOutputViewport* viewport : this->m_screens) {
++	if (viewport->callbackInitialized && viewport->frameCallback == nullptr) {
++	    viewport->rendering = true;
++	    this->getApp ().update (viewport);
++	    viewport->rendering = false;
++	}
++    }
++}
++
+ Output::Output& WaylandOpenGLDriver::getOutput () { return this->m_output; }
+ 
+-float WaylandOpenGLDriver::getRenderTime () const {
++float WaylandOpenGLDriver::getClockTime () const {
+     return static_cast<float> (std::chrono::duration_cast<std::chrono::microseconds> (
+ 				   std::chrono::high_resolution_clock::now () - renderStart
+ 	   )
+diff --git a/src/WallpaperEngine/Render/Drivers/WaylandOpenGLDriver.h b/src/WallpaperEngine/Render/Drivers/WaylandOpenGLDriver.h
+index db666575..6e1d8e61 100644
+--- a/src/WallpaperEngine/Render/Drivers/WaylandOpenGLDriver.h
++++ b/src/WallpaperEngine/Render/Drivers/WaylandOpenGLDriver.h
+@@ -62,7 +62,7 @@ public:
+     ~WaylandOpenGLDriver ();
+ 
+     [[nodiscard]] Output::Output& getOutput () override;
+-    float getRenderTime () const override;
++    float getClockTime () const override;
+     bool closeRequested () override;
+     void resizeWindow (glm::ivec2 size) override;
+     void resizeWindow (glm::ivec4 sizeandpos) override;
+@@ -71,6 +71,10 @@ public:
+     glm::ivec2 getFramebufferSize () const override;
+     uint32_t getFrameCounter () const override;
+     void dispatchEventQueue () override;
++    void waitForEvents (const std::vector<int>& fds, int timeoutMs) override;
++    void renderHeldFrame () override;
++    void forgetHeldFrames () override;
++    void resumeRendering () override;
+     [[nodiscard]] void* getProcAddress (const char* name) const override;
+     [[nodiscard]] wl_display* getWaylandDisplay () const override;
+ 
+diff --git a/src/WallpaperEngine/Render/RenderContext.cpp b/src/WallpaperEngine/Render/RenderContext.cpp
+index 6751a148..f228e249 100644
+--- a/src/WallpaperEngine/Render/RenderContext.cpp
++++ b/src/WallpaperEngine/Render/RenderContext.cpp
+@@ -7,6 +7,7 @@
+ 
+ #include "WallpaperEngine/Data/Model/Project.h"
+ #include "WallpaperEngine/Logging/Log.h"
++#include "WallpaperEngine/Render/Drivers/FrameHash.h"
+ 
+ namespace WallpaperEngine::Render {
+ RenderContext::RenderContext (
+@@ -58,9 +59,41 @@ void RenderContext::framePresented (const Drivers::Output::OutputViewport* viewp
+     }
+ 
+     this->m_firstFrameReported = true;
++    this->m_firstFrameAt = std::chrono::steady_clock::now ();
+     sLog.out ("First frame presented");
+ }
+ 
++std::optional<std::chrono::steady_clock::time_point> RenderContext::firstFrameAt () const {
++    return this->m_firstFrameAt;
++}
++
++void RenderContext::renderHeld (Drivers::Output::OutputViewport* viewport) {
++    viewport->makeCurrent ();
++
++    const auto ref = this->m_wallpapers.find (viewport->name);
++
++    if (ref == this->m_wallpapers.end ()) {
++	return;
++    }
++
++    ref->second->render (
++	viewport->viewport, this->getOutput ().renderVFlip (), viewport->globalPosition, viewport->logicalSize
++    );
++
++    // nothing changed (the usual case: a clock without seconds, or no clock at all), the screen keeps the
++    // frame it has and the compositor has nothing to do
++    const uint64_t hash
++	= Drivers::hashFramebuffer (this->m_app.getDestinationFramebuffer (), viewport->viewport, this->m_heldPixels);
++
++    if (hash == viewport->heldFrameHash) {
++	return;
++    }
++
++    viewport->heldFrameHash = hash;
++    viewport->swappingContent = ref->second->hasContent ();
++    viewport->swapOutput ();
++}
++
+ void RenderContext::setWallpaper (const std::string& display, std::shared_ptr<CWallpaper> wallpaper) {
+     wallpaper->setDestinationFramebuffer (this->m_app.getDestinationFramebuffer ());
+     this->m_wallpapers.insert_or_assign (display, wallpaper);
+diff --git a/src/WallpaperEngine/Render/RenderContext.h b/src/WallpaperEngine/Render/RenderContext.h
+index 96cb98a8..0b192f5e 100644
+--- a/src/WallpaperEngine/Render/RenderContext.h
++++ b/src/WallpaperEngine/Render/RenderContext.h
+@@ -1,6 +1,8 @@
+ #pragma once
+ 
++#include <chrono>
+ #include <glm/vec4.hpp>
++#include <optional>
+ #include <memory>
+ #include <set>
+ #include <vector>
+@@ -44,6 +46,17 @@ namespace Render {
+ 	 * been shown this prints "First frame presented" (a launcher waits for it before freezing the process)
+ 	 */
+ 	void framePresented (const Drivers::Output::OutputViewport* viewport);
++	/**
++	 * Renders a frame of the held wallpaper and shows it only if it looks different from the last frame the
++	 * viewport showed while held
++	 *
++	 * @param viewport
++	 */
++	void renderHeld (Drivers::Output::OutputViewport* viewport);
++	/**
++	 * @return When every screen had shown its first frame, nothing before that
++	 */
++	[[nodiscard]] std::optional<std::chrono::steady_clock::time_point> firstFrameAt () const;
+ 	void setWallpaper (const std::string& display, std::shared_ptr<CWallpaper> wallpaper);
+ 	void setPause (bool newState) const;
+ 	[[nodiscard]] Input::InputContext& getInputContext () const;
+@@ -68,6 +81,9 @@ namespace Render {
+ 	/** Screens whose wallpaper the compositor has shown a frame of */
+ 	std::set<std::string> m_presented = {};
+ 	bool m_firstFrameReported = false;
++	std::optional<std::chrono::steady_clock::time_point> m_firstFrameAt = std::nullopt;
++	/** Pixels read back to hash held frames */
++	std::vector<uint8_t> m_heldPixels = {};
+     };
+ } // namespace Render
+ } // namespace WallpaperEngine
+diff --git a/src/WallpaperEngine/Render/Wallpapers/CVideo.cpp b/src/WallpaperEngine/Render/Wallpapers/CVideo.cpp
+index 9f266ffd..692541c2 100644
+--- a/src/WallpaperEngine/Render/Wallpapers/CVideo.cpp
++++ b/src/WallpaperEngine/Render/Wallpapers/CVideo.cpp
+@@ -3,6 +3,7 @@
+ #include "WallpaperEngine/Data/Model/Project.h"
+ #include "WallpaperEngine/Data/Model/Wallpaper.h"
+ #include "WallpaperEngine/VideoPlayback/MPV/GLPlayer.h"
++#include <cmath>
+ 
+ using namespace WallpaperEngine;
+ using namespace WallpaperEngine::Render;
+@@ -31,7 +32,9 @@ CVideo::CVideo (
+     // --silent disables audio (audio.enabled = false) and must mute video wallpapers too;
+     // a volume of 0 mutes the mpv backend (matching what --volume 0 already does).
+     const auto& audioSettings = this->getContext ().getApp ().getContext ().settings.audio;
+-    this->m_player->setVolume (audioSettings.enabled ? audioSettings.volume * 100.0 / 128.0 : 0.0);
++    this->m_baseVolume = audioSettings.enabled ? audioSettings.volume * 100.0 / 128.0 : 0.0;
++    this->m_appliedVolume = audioSettings.muted ? 0.0 : this->m_baseVolume;
++    this->m_player->setVolume (this->m_appliedVolume);
+     // make sure the video has at least one usage marked, this ensures the video plays
+     this->m_player->incrementUsageCount ();
+ }
+@@ -39,15 +42,18 @@ CVideo::CVideo (
+ CVideo::~CVideo () { this->m_player->decrementUsageCount (); }
+ 
+ void CVideo::renderFrame (const glm::ivec4& viewport) {
+-    // ensure the video's audio follows audio detection rules
+-    if (this->getContext ().getApp ().getContext ().settings.audio.enabled
+-	&& this->m_muted != this->getAudioContext ().getDriver ().getAudioDetector ().anythingPlaying ()) {
+-	this->m_muted = !this->m_muted;
+-
+-	if (this->m_muted) {
+-	    this->m_player->setMuted ();
+-	} else {
+-	    this->m_player->clearMuted ();
++    // fade the video's sound out while something else plays or the wallpaper is muted, and back in after
++    if (this->m_baseVolume > 0.0) {
++	const float now = this->getContext ().getDriver ().getClockTime ();
++	const float seconds = this->m_lastRampTime > 0.0f ? now - this->m_lastRampTime : 0.0f;
++	this->m_lastRampTime = now;
++
++	const bool silence = this->getAudioContext ().getDriver ().getAudioDetector ().wantsSilence ();
++	const double volume = this->m_baseVolume * this->m_ramp.step (silence, seconds);
++
++	if (std::abs (volume - this->m_appliedVolume) >= 0.5 || (volume == 0.0) != (this->m_appliedVolume == 0.0)) {
++	    this->m_player->setVolume (volume);
++	    this->m_appliedVolume = volume;
+ 	}
+     }
+ 
+diff --git a/src/WallpaperEngine/Render/Wallpapers/CVideo.h b/src/WallpaperEngine/Render/Wallpapers/CVideo.h
+index 5db8c54e..ca1740da 100644
+--- a/src/WallpaperEngine/Render/Wallpapers/CVideo.h
++++ b/src/WallpaperEngine/Render/Wallpapers/CVideo.h
+@@ -1,6 +1,7 @@
+ #pragma once
+ 
+ #include "WallpaperEngine/Audio/AudioStream.h"
++#include "WallpaperEngine/Audio/Drivers/Detectors/GainRamp.h"
+ #include "WallpaperEngine/Render/CWallpaper.h"
+ #include "WallpaperEngine/VideoPlayback/MPV/GLPlayer.h"
+ 
+@@ -34,6 +35,11 @@ protected:
+ private:
+     GLPlayerUniquePtr m_player;
+ 
+-    bool m_muted = false;
++    /** Fade of the video's sound, see GainRamp */
++    Audio::Drivers::Detectors::GainRamp m_ramp;
++    /** Volume set on the player, and the volume to fade from */
++    double m_baseVolume = 0.0;
++    double m_appliedVolume = -1.0;
++    float m_lastRampTime = 0.0f;
+ };
+ } // namespace WallpaperEngine::Render::Wallpapers
+diff --git a/src/WallpaperEngine/Testing/Render/TestingOpenGLDriver.cpp b/src/WallpaperEngine/Testing/Render/TestingOpenGLDriver.cpp
+index 7a557699..37f7b7df 100644
+--- a/src/WallpaperEngine/Testing/Render/TestingOpenGLDriver.cpp
++++ b/src/WallpaperEngine/Testing/Render/TestingOpenGLDriver.cpp
+@@ -67,7 +67,7 @@ void* TestingOpenGLDriver::getProcAddress (const char* name) const {
+     return reinterpret_cast<void*> (glfwGetProcAddress (name));
+ }
+ 
+-float TestingOpenGLDriver::getRenderTime () const { return static_cast<float> (glfwGetTime ()); }
++float TestingOpenGLDriver::getClockTime () const { return static_cast<float> (glfwGetTime ()); }
+ 
+ bool TestingOpenGLDriver::closeRequested () { return glfwWindowShouldClose (this->m_window); }
+ 
+@@ -94,7 +94,7 @@ uint32_t TestingOpenGLDriver::getFrameCounter () const { return this->m_frameCou
+ void TestingOpenGLDriver::dispatchEventQueue () {
+     static float startTime, endTime, minimumTime = 1.0f / this->m_context.settings.render.maximumFPS;
+     // get the start time of the frame
+-    startTime = this->getRenderTime ();
++    startTime = this->getClockTime ();
+     // clear the screen
+     glClear (GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+ 
+@@ -136,5 +136,5 @@ void TestingOpenGLDriver::dispatchEventQueue () {
+     // increase frame counter
+     this->m_frameCounter++;
+     // get the end time of the frame
+-    endTime = this->getRenderTime ();
++    endTime = this->getClockTime ();
+ }
+diff --git a/src/WallpaperEngine/Testing/Render/TestingOpenGLDriver.h b/src/WallpaperEngine/Testing/Render/TestingOpenGLDriver.h
+index e667f172..dfd64012 100644
+--- a/src/WallpaperEngine/Testing/Render/TestingOpenGLDriver.h
++++ b/src/WallpaperEngine/Testing/Render/TestingOpenGLDriver.h
+@@ -20,7 +20,7 @@ public:
+ 
+     [[nodiscard]] Output::Output& getOutput () override;
+     [[nodiscard]] void* getProcAddress (const char* name) const override;
+-    [[nodiscard]] float getRenderTime () const override;
++    [[nodiscard]] float getClockTime () const override;
+     bool closeRequested () override;
+     void resizeWindow (glm::ivec2 size) override;
+     void resizeWindow (glm::ivec4 sizeandpos) override;
+-- 
+2.55.0
+
