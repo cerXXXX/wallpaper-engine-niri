@@ -77,7 +77,9 @@ below) and the plugin settings (step 5) are still up to you.
    streams it while locked (patched engine, plugin toggle **Live Scene on Lock Screen**, on by default;
    `dms ipc call linuxWallpaperEngine lockStreams` shows the streams while locked). In eco the scene is held still
    and only a changed frame is written (clocks, `--frame-file`), the lock screen shows it as an image
-   (`dms ipc call linuxWallpaperEngine lockFrames`). The blur is switched in DMS
+   (`dms ipc call linuxWallpaperEngine lockFrames`). The live scene fades in over the screenshot once it has
+   played cleanly for 2 s (a stream joined live decodes into garbage until its next keyframe), and the player loads
+   without holding up the lock screen. The blur is switched in DMS
    Settings → Lock Screen → Appearance → **Blur Wallpaper** (on by default, as in stock DMS).
 
 After that wallpapers are switched from the DMS dashboard (click the bar clock → Wallpapers).
@@ -165,6 +167,11 @@ All seven apply on upstream `b016d7d` (pinned in the PKGBUILD).
     card can sleep.
   - Measured (CPU of one core, 15 FPS, 75 s): the clock scene 2.2% and ~15 frames/s normally, 0.37% and one frame a
     minute (on the minute) with `--eco`; the 1080p video 2.5% → 0.33%.
+
+- **0010 ropetrail.** `ropetrail` particles went through the rope renderer, which joins all of an emitter's
+  particles in spawn order: the clock scene's shooting stars were joined by thin lines across the screen in about
+  every other frame (on the desktop too, most visible on the lock screen). Each particle now draws its own trail
+  through the positions it had over the renderer's length.
 
 Measured on Intel Iris Xe (Tiger Lake), niri, one 1920x1080@60 output; rendered frames counted from
 `wl_surface.attach` with `WAYLAND_DEBUG=1`, CPU as a share of one core:

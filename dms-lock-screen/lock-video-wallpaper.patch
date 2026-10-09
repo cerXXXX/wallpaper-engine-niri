@@ -75,7 +75,7 @@
          layer.effect: MultiEffect {
              autoPaddingEnabled: false
              blurEnabled: true
-@@ -274,6 +303,126 @@
+@@ -274,6 +303,143 @@
              }
          }
      }
@@ -119,8 +119,19 @@
 +                id: streamLoader
 +                anchors.fill: parent
 +                source: "VideoScreensaverPlayer.qml"
++                // the player (and QtMultimedia) loads without holding up the lock screen
++                asynchronous: true
 +                // 1 = MediaPlayer.PlayingState (QtMultimedia is only loaded through the player file)
-+                opacity: item && item.hasVideo && item.playbackState === 1 ? 1 : 0
++                readonly property bool playing: item !== null && item.hasVideo && item.playbackState === 1
++                // the first second of a stream joined live decodes into garbage until its next keyframe: the
++                // screenshot stays up until it has played cleanly for a moment
++                property bool settled: false
++                opacity: playing && settled ? 1 : 0
++                onPlayingChanged: {
++                    settled = false;
++                    if (playing)
++                        settleTimer.restart();
++                }
 +                onLoaded: {
 +                    item.source = wallpaperBackground.engineStream;
 +                    item.play();
@@ -140,6 +151,12 @@
 +                    item.source = "";
 +                    item.source = wallpaperBackground.engineStream;
 +                    item.play();
++                }
++
++                Timer {
++                    id: settleTimer
++                    interval: 2000
++                    onTriggered: streamLoader.settled = streamLoader.playing
 +                }
 +
 +                Timer {
