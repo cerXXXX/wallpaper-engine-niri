@@ -24,7 +24,9 @@ cd wallpaper-engine-niri
 
 Updating later: `git pull && ./install.sh`. The script, run as your user (it asks for sudo itself):
 
-- builds and installs the patched engine with `makepkg -Csi`, unless that version is already installed;
+- builds and installs the patched engine with `makepkg -si` on all cores, unless that version is already installed
+  (the previous build in `engine/src` is reused, so a new patch only compiles what it changed; `rm -rf engine/src`
+  for a clean build);
 - clones both DMS plugins into `~/.config/DankMaterialShell/plugins`, or updates existing checkouts with
   `git pull --ff-only` (a checkout of the upstream plugin is switched to the fork first; one on another branch or
   with local changes is left alone with a warning);

@@ -38,6 +38,9 @@ pkgver() {
 
 prepare() {
     cd "$pkgname"
+    # an older build's src dir is reused (only what changed is compiled again): makepkg's checkout restores the
+    # patched files, the files the patches create are removed here
+    git clean -fdq -e .claude
     git submodule update --init --recursive
     git -c protocol.file.allow=always submodule update
 

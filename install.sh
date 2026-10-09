@@ -58,8 +58,9 @@ if [ "$do_engine" = 1 ]; then
         echo "already installed: $installed (--rebuild-engine builds it again)"
     else
         echo "installed: ${installed:-none}, building $wanted"
-        # -C: a source dir left by an older build would make the patches fail to apply
-        (cd "$here/engine" && makepkg -Csi --noconfirm)
+        # no -C: the previous build's objects are reused (prepare() resets the patched sources); all cores unless
+        # MAKEFLAGS says otherwise
+        (cd "$here/engine" && MAKEFLAGS="${MAKEFLAGS:--j$(nproc)}" makepkg -si --noconfirm)
     fi
 fi
 
