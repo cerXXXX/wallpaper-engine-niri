@@ -6,7 +6,7 @@ shell=/usr/share/quickshell/dms
 patchfile=/usr/local/share/dms-lock-video/lock-video-wallpaper.patch
 lock="$shell/Modules/Lock/LockScreenContent.qml"
 # only the current version of the patch has this; every version has lockVideoWallpaper
-marker=lockFrames
+marker=settleTimer
 
 if grep -q "$marker" "$lock"; then
     echo "dms-lock-video: already patched"
