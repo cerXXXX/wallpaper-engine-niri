@@ -20,7 +20,7 @@
  
 --- a/Modules/Lock/LockScreenContent.qml
 +++ b/Modules/Lock/LockScreenContent.qml
-@@ -241,9 +241,27 @@
+@@ -241,9 +241,35 @@
          id: wallpaperBackground
          anchors.fill: parent
  
@@ -40,6 +40,14 @@
 +            var vars = PluginService.globalVars["linuxWallpaperEngine"] || {};
 +            return (vars.lockStreams || {})[root.screenName] || "";
 +        }
++        // lockFrames: in eco the plugin holds the scene still and its engine writes a frame (an image file) only
++        // when it changes, e.g. a clock; every frame comes with a new URL
++        readonly property string engineFrame: {
++            if (root.hasCustomWallpaper || engineVideo !== "" || engineStream !== "")
++                return "";
++            var vars = PluginService.globalVars["linuxWallpaperEngine"] || {};
++            return (vars.lockFrames || {})[root.screenName] || "";
++        }
          readonly property string wallpaperSource: {
              if (root.hasCustomWallpaper)
                  return root.encodeFileUrl(SettingsData.lockScreenWallpaperPath);
@@ -48,7 +56,7 @@
              var w = SessionData.getMonitorWallpaper(screenName);
              return (w && !w.startsWith("#")) ? encodeFileUrl(w) : "";
          }
-@@ -252,13 +270,16 @@
+@@ -252,13 +278,16 @@
                  return SettingsData.lockScreenWallpaperFillMode;
              return root.hasCustomWallpaper ? "Fill" : SessionData.getMonitorWallpaperFillMode(root.screenName);
          }
@@ -59,7 +67,7 @@
          asynchronous: false
  
 -        sourceComponent: fillModeName === "Scrolling" ? scrollWallpaperComp : plainWallpaperComp
-+        sourceComponent: isVideo ? videoWallpaperComp : engineStream !== "" ? streamWallpaperComp : fillModeName === "Scrolling" ? scrollWallpaperComp : plainWallpaperComp
++        sourceComponent: isVideo ? videoWallpaperComp : engineStream !== "" ? streamWallpaperComp : engineFrame !== "" ? frameWallpaperComp : fillModeName === "Scrolling" ? scrollWallpaperComp : plainWallpaperComp
  
 -        layer.enabled: true
 +        // lockScreenWallpaperBlur: off draws the wallpaper sharp, without the offscreen blur layer
@@ -67,7 +75,7 @@
          layer.effect: MultiEffect {
              autoPaddingEnabled: false
              blurEnabled: true
-@@ -274,6 +295,97 @@
+@@ -274,6 +303,126 @@
              }
          }
      }
@@ -157,6 +165,35 @@
 +                    target: wallpaperBackground
 +                    function onEngineStreamChanged() {
 +                        streamLoader.reconnect();
++                    }
++                }
++            }
++        }
++    }
++
++    // lockFrames: the static screenshot with the scene's latest frame on top; a local image loads synchronously,
++    // so the old frame stays up until the new one replaces it
++    Component {
++        id: frameWallpaperComp
++        Item {
++            Loader {
++                anchors.fill: parent
++                sourceComponent: wallpaperBackground.fillModeName === "Scrolling" ? scrollWallpaperComp : plainWallpaperComp
++            }
++
++            Image {
++                anchors.fill: parent
++                source: wallpaperBackground.engineFrame
++                fillMode: Image.PreserveAspectCrop
++                asynchronous: false
++                cache: false
++                smooth: true
++                opacity: status === Image.Ready ? 1 : 0
++
++                Behavior on opacity {
++                    NumberAnimation {
++                        duration: Theme.mediumDuration
++                        easing.type: Theme.standardEasing
 +                    }
 +                }
 +            }

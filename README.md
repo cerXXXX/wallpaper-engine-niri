@@ -9,9 +9,9 @@ My setup for animated [Wallpaper Engine](https://store.steampowered.com/app/4319
 | Part | What it does |
 |---|---|
 | [dms-wallpaperengine-dashbridge](https://github.com/cerXXXX/dms-wallpaperengine-dashbridge) | DMS plugin (separate repo): the whole Workshop library in the DMS wallpaper picker, keeps the DMS wallpaper from covering the engine, video wallpapers on the lock screen |
-| [dms-wallpaperengine](https://github.com/cerXXXX/dms-wallpaperengine) | Fork of the Linux Wallpaper Engine DMS plugin (separate repo): **Downscale to Screen** toggle, separate scene/video FPS, per-scene render settings, scene properties with readable choices (language picker, color picker, options of other languages hidden), **Layers & Effects** to turn parts of a scene off, live scenes on the lock screen, stale screenshot timer fix |
-| [`engine/`](engine) | linux-wallpaperengine patches + PKGBUILD: zero-copy VA-API video, correct video frame pacing, video wallpapers rendered at the video's frame rate, `--downscale-to-output`, scene clocks/text and scripts that work, `--stream` (live scenes for the lock screen), hidden layers not loaded and layers/effects the user can turn off |
-| [`dms-lock-screen/`](dms-lock-screen) | DMS patch + pacman hook: a video set as the lock screen wallpaper (or the desktop's Wallpaper Engine video) plays behind the clock and password field, the desktop's Wallpaper Engine scene runs live there; a **Blur Wallpaper** toggle for the lock screen background |
+| [dms-wallpaperengine](https://github.com/cerXXXX/dms-wallpaperengine) | Fork of the Linux Wallpaper Engine DMS plugin (separate repo): **Downscale to Screen** toggle, separate scene/video FPS, per-scene render settings, scene properties with readable choices (language picker, color picker, options of other languages hidden), **Layers & Effects** to turn parts of a scene off, live scenes on the lock screen, **Power Modes** per power profile (eco holds the wallpaper still with live clocks), stale screenshot timer fix |
+| [`engine/`](engine) | linux-wallpaperengine patches + PKGBUILD: zero-copy VA-API video, correct video frame pacing, video wallpapers rendered at the video's frame rate, `--downscale-to-output`, scene clocks/text and scripts that work, `--stream` (live scenes for the lock screen), hidden layers not loaded and layers/effects the user can turn off, a first-frame marker, `--eco` (held still, redrawn only when a clock changes) with a control channel and sound fades |
+| [`dms-lock-screen/`](dms-lock-screen) | DMS patch + pacman hook: a video set as the lock screen wallpaper (or the desktop's Wallpaper Engine video) plays behind the clock and password field, the desktop's Wallpaper Engine scene runs live there (held still with live clocks in eco); a **Blur Wallpaper** toggle for the lock screen background |
 | [`system/`](system) | niri layer rule, `makepkg.conf` without `-debug` packages |
 
 ## Install or update everything
@@ -63,7 +63,7 @@ below) and the plugin settings (step 5) are still up to you.
    git pull --ff-only
    ```
 5. **Plugin settings** (DMS Settings → Plugins → Linux Wallpaper Engine): enable **Generate static wallpaper**, pick a
-   wallpaper once, enable **Pause on Battery**, and under Advanced Settings → Performance & Rendering enable
+   wallpaper once, pick the **Power Modes** for each power profile (defaults: Full / Eco / Eco), and under Advanced Settings → Performance & Rendering enable
    **Downscale to Screen** (needs the patched engine from step 3).
 6. **niri:** add [`system/niri-layer-rule.kdl`](system/niri-layer-rule.kdl) to `~/.config/niri/config.kdl`.
 7. **Lock screen video and blur toggle** (optional):
@@ -75,7 +75,9 @@ below) and the plugin settings (step 5) are still up to you.
    showing a Wallpaper Engine **video** wallpaper plays the same video on the lock screen (the plugin fork publishes
    it; `dms ipc call linuxWallpaperEngine lockVideos` shows what it publishes), and a **scene** runs live: the plugin
    streams it while locked (patched engine, plugin toggle **Live Scene on Lock Screen**, on by default;
-   `dms ipc call linuxWallpaperEngine lockStreams` shows the streams while locked). The blur is switched in DMS
+   `dms ipc call linuxWallpaperEngine lockStreams` shows the streams while locked). In eco the scene is held still
+   and only a changed frame is written (clocks, `--frame-file`), the lock screen shows it as an image
+   (`dms ipc call linuxWallpaperEngine lockFrames`). The blur is switched in DMS
    Settings → Lock Screen → Appearance → **Blur Wallpaper** (on by default, as in stock DMS).
 
 After that wallpapers are switched from the DMS dashboard (click the bar clock → Wallpapers).
@@ -146,6 +148,23 @@ All seven apply on upstream `b016d7d` (pinned in the PKGBUILD).
   wallpapers (power saver, battery) with SIGSTOP only after it, so a cold start while paused still shows the
   wallpaper instead of an empty screen. Measured: 0.6 s for a 1080p video, 1.9 s for the clock scene, 3.7 s for the
   4K Big Sur scene.
+- **0009 eco mode, control channel, sound fades.**
+  - `--eco` holds the wallpaper still once its first frame has been up for a second. The animation time stops
+    (particles, shaders, texture animations; videos pause), scripts keep reading the real time. Every second, just
+    after the second changes, the frame is rendered and hashed and only shown when it changed: a clock with seconds
+    updates every second, one without once a minute, a wallpaper without clocks never. The tick is a `timerfd` that
+    is re-aligned when the clock jumps (suspend, time zone).
+  - `--control` reads commands on stdin (`eco on|off`, `fps <n>`, `mute on|off`), so the plugin switches modes
+    without restarting the engine.
+  - `--frame-file <path>` renders in a hidden window like `--stream` and writes each changed frame as PPM, printing
+    `Frame written`: the lock screen's eco mode.
+  - Sound fades out over 0.5 s (muted, or another app plays) and comes back 2 s after the other app stopped. The
+    automute detector never saw anything on PipeWire (native streams carry their process id on the client, not the
+    stream); it now checks the client, ignores paused streams and other wallpapers, and polls at most every 250 ms.
+    The SDL device is paused while there's nothing to hear (it played silence even with `--silent`), so the sound
+    card can sleep.
+  - Measured (CPU of one core, 15 FPS, 75 s): the clock scene 2.2% and ~15 frames/s normally, 0.37% and one frame a
+    minute (on the minute) with `--eco`; the 1080p video 2.5% → 0.33%.
 
 Measured on Intel Iris Xe (Tiger Lake), niri, one 1920x1080@60 output; rendered frames counted from
 `wl_surface.attach` with `WAYLAND_DEBUG=1`, CPU as a share of one core:
