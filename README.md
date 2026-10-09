@@ -10,7 +10,7 @@ My setup for animated [Wallpaper Engine](https://store.steampowered.com/app/4319
 |---|---|
 | [dms-wallpaperengine-dashbridge](https://github.com/cerXXXX/dms-wallpaperengine-dashbridge) | DMS plugin (separate repo): the whole Workshop library in the DMS wallpaper picker, keeps the DMS wallpaper from covering the engine, video wallpapers on the lock screen |
 | [dms-wallpaperengine](https://github.com/cerXXXX/dms-wallpaperengine) | Fork of the Linux Wallpaper Engine DMS plugin (separate repo): **Downscale to Screen** toggle, stale screenshot timer fix |
-| [`engine/`](engine) | linux-wallpaperengine patches + PKGBUILD: zero-copy VA-API video, correct video frame pacing, video wallpapers rendered at the video's frame rate, `--downscale-to-output` |
+| [`engine/`](engine) | linux-wallpaperengine patches + PKGBUILD: zero-copy VA-API video, correct video frame pacing, video wallpapers rendered at the video's frame rate, `--downscale-to-output`, scene clocks/text and scripts that work |
 | [`dms-lock-screen/`](dms-lock-screen) | DMS patch + pacman hook: a video set as the lock screen wallpaper (or the desktop's Wallpaper Engine video) plays behind the clock and password field; a **Blur Wallpaper** toggle for the lock screen background |
 | [`system/`](system) | niri layer rule, `makepkg.conf` without `-debug` packages |
 
@@ -57,7 +57,7 @@ After that wallpapers are switched from the DMS dashboard (click the bar clock â
 
 ## Engine patches
 
-All four apply on upstream `b016d7d` (pinned in the PKGBUILD).
+All five apply on upstream `b016d7d` (pinned in the PKGBUILD).
 
 - **0001 zero-copy VA-API.** `GLPlayer` created the libmpv render context without `MPV_RENDER_PARAM_WL_DISPLAY`, so mpv
   had no hwdec interop and fell back to `vaapi-copy`, copying every decoded frame through system memory. The Wayland
@@ -78,6 +78,26 @@ All four apply on upstream `b016d7d` (pinned in the PKGBUILD).
   screen's pixel ratio. Nothing is scaled up, and screenshots (the plugin's static wallpaper) read the framebuffer at
   its real size. Effects keep their size on screen (`g_TexelSize` stays in scene units); a 1:1 crop of the 4K scene
   looks the same at both resolutions.
+- **0005 scene clocks, compose layers, scripts.** Found on a clock + audio visualizer scene
+  ([3299228616](https://steamcommunity.com/sharedfiles/filedetails/?id=3299228616)), the fixes are generic:
+  - compose layers with `"copybackground": false` start transparent (`CLEARALPHA`); before, their scroll/fisheye effects
+    moved a copy of the background around, which showed up as broken rectangles over the clock;
+  - objects are hidden when a parent is: scenes switch whole groups (one per language or clock position) through the
+    parent's visibility, so every variant used to be drawn on top of each other;
+  - text: positioned through its parents like images (it used to land off screen), Y axis and rotation like images,
+    `pointsize` in points at 300 DPI and rasterized at its size in the scene, UTF-8, a monospace system font for
+    `systemfont_consolas`/`courier`, opacity from `alpha`;
+  - integer colors with every channel <= 1 (`"1 1 1"` in `project.json`) are normalized colors, not 0-255 (white text
+    came out black);
+  - property scripts (`visible`, `origin`, `alpha`... with `export function update`) never ran: evaluating a module
+    doesn't expose its exports, `thisLayer` had no properties, and returned values were lost. Scripts now run from the
+    module namespace, each with its own `thisLayer` (readable and assignable), `createScriptProperties ()` works at
+    the top level, and `thisLayer.getTextureAnimation ()` (`setFrame`/`getFrame`/`frameCount`/`play`/`pause`/`stop`/
+    `isPlaying`) drives sprite sheets (the scene's AM/PM marker). The first error of every script is logged once.
+
+  Checked against the other ten installed scenes (screenshots before/after): no visible change except
+  [3624053922](https://steamcommunity.com/sharedfiles/filedetails/?id=3624053922), which used to render black and now
+  shows.
 
 Measured on Intel Iris Xe (Tiger Lake), niri, one 1920x1080@60 output; rendered frames counted from
 `wl_surface.attach` with `WAYLAND_DEBUG=1`, CPU as a share of one core:
