@@ -1,0 +1,39 @@
+From 504bcc54862788f4e53642f079af9f883b5c88d0 Mon Sep 17 00:00:00 2001
+From: cerXXXX <84661580+cerXXXX@users.noreply.github.com>
+Date: Fri, 9 Oct 2026 20:08:08 +0300
+Subject: [PATCH] perf: --stream sends a keyframe three times a second
+
+A player joining the live stream (the lock screen) decodes garbage until
+the next keyframe, and the first GOP after joining is always broken over
+UDP. With a keyframe every fps/3 frames instead of every second the lock
+screen can show the live scene ~1.4 s sooner.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01TTuB8NJnTLq87k77DhTeWu
+---
+ src/WallpaperEngine/Render/Drivers/FrameStream.cpp | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/src/WallpaperEngine/Render/Drivers/FrameStream.cpp b/src/WallpaperEngine/Render/Drivers/FrameStream.cpp
+index 709d82b4..8c286c26 100644
+--- a/src/WallpaperEngine/Render/Drivers/FrameStream.cpp
++++ b/src/WallpaperEngine/Render/Drivers/FrameStream.cpp
+@@ -32,12 +32,14 @@ void FrameStream::start (int width, int height) {
+ 
+     const std::string size = std::to_string (width) + "x" + std::to_string (height);
+     const std::string fps = std::to_string (this->m_fps);
++    // a keyframe three times a second: a player joining the live stream shows garbage until the next one
++    const std::string keyframeInterval = std::to_string (std::max (1, this->m_fps / 3));
+     // frames come bottom-up from glReadPixels; timestamps follow the wall clock so a slow frame doesn't make the
+     // stream run fast, the player keeps up with a live source
+     std::vector<std::string> args = {
+ 	"ffmpeg", "-hide_banner", "-loglevel", "error", "-use_wallclock_as_timestamps", "1", "-f", "rawvideo",
+ 	"-pix_fmt", "rgba", "-s", size, "-i", "-", "-vaapi_device", "/dev/dri/renderD128", "-vf",
+-	"vflip,format=nv12,hwupload", "-c:v", "h264_vaapi", "-g", fps, "-bf", "0", "-bsf:v", "dump_extra", "-fps_mode", "passthrough",
++	"vflip,format=nv12,hwupload", "-c:v", "h264_vaapi", "-g", keyframeInterval, "-bf", "0", "-bsf:v", "dump_extra", "-fps_mode", "passthrough",
+ 	"-f", "mpegts", this->m_target,
+     };
+     std::vector<char*> argv;
+-- 
+2.55.0
+

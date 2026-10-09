@@ -78,7 +78,7 @@ below) and the plugin settings (step 5) are still up to you.
    `dms ipc call linuxWallpaperEngine lockStreams` shows the streams while locked). In eco the scene is held still
    and only a changed frame is written (clocks, `--frame-file`), the lock screen shows it as an image
    (`dms ipc call linuxWallpaperEngine lockFrames`). The live scene fades in over the screenshot once it has
-   played cleanly for 2 s (a stream joined live decodes into garbage until its next keyframe), and the player loads
+   played cleanly for 0.6 s (a stream joined live decodes into garbage until its next keyframe), and the player loads
    without holding up the lock screen. The blur is switched in DMS
    Settings → Lock Screen → Appearance → **Blur Wallpaper** (on by default, as in stock DMS).
 
@@ -172,6 +172,10 @@ All seven apply on upstream `b016d7d` (pinned in the PKGBUILD).
   particles in spawn order: the clock scene's shooting stars were joined by thin lines across the screen in about
   every other frame (on the desktop too, most visible on the lock screen). Each particle now draws its own trail
   through the positions it had over the renderer's length.
+
+- **0011 stream keyframes.** `--stream` sends a keyframe every third of a second instead of every second. A player
+  joining the live stream (the lock screen) decodes garbage until the next keyframe, and over UDP the first GOP is
+  always broken; it now lasts ~0.3 s, so the lock screen shows the live scene ~1.4 s sooner.
 
 Measured on Intel Iris Xe (Tiger Lake), niri, one 1920x1080@60 output; rendered frames counted from
 `wl_surface.attach` with `WAYLAND_DEBUG=1`, CPU as a share of one core:

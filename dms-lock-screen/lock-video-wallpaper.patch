@@ -75,7 +75,7 @@
          layer.effect: MultiEffect {
              autoPaddingEnabled: false
              blurEnabled: true
-@@ -274,6 +303,143 @@
+@@ -274,6 +303,145 @@
              }
          }
      }
@@ -123,8 +123,8 @@
 +                asynchronous: true
 +                // 1 = MediaPlayer.PlayingState (QtMultimedia is only loaded through the player file)
 +                readonly property bool playing: item !== null && item.hasVideo && item.playbackState === 1
-+                // the first second of a stream joined live decodes into garbage until its next keyframe: the
-+                // screenshot stays up until it has played cleanly for a moment
++                // a stream joined live decodes into garbage until its next keyframe: the screenshot stays up
++                // until it has played cleanly for a moment
 +                property bool settled: false
 +                opacity: playing && settled ? 1 : 0
 +                onPlayingChanged: {
@@ -153,9 +153,11 @@
 +                    item.play();
 +                }
 +
++                // lockSettleMs: the engine sends a keyframe every third of a second (patch 0011), so the broken
++                // first GOP is over well within this
 +                Timer {
 +                    id: settleTimer
-+                    interval: 2000
++                    interval: 600
 +                    onTriggered: streamLoader.settled = streamLoader.playing
 +                }
 +
