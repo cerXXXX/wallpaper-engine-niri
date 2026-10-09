@@ -1,0 +1,339 @@
+From 891a666126b5d7859dc71da6a1d1d94226de446e Mon Sep 17 00:00:00 2001
+From: cerXXXX <polyakovia2009@gmail.com>
+Date: Fri, 9 Oct 2026 10:39:00 +0300
+Subject: [PATCH] feat: --stream renders without a window and streams the
+ frames live
+
+With --stream <url> (and --window for the size) the GLFW window is created
+at the stream's size and never shown; every frame is read back and piped
+to an ffmpeg child that encodes it with VA-API H.264 into MPEG-TS at the
+given URL (e.g. udp://127.0.0.1:41234), timestamps from the wall clock and
+SPS/PPS on every keyframe so players can join at any time. Meant for
+showing a live scene where the engine's own surface can't be seen, like a
+lock screen.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JnSVvFGk6GTNXvPXqCPwwh
+---
+ CMakeLists.txt                                |   2 +
+ .../Application/ApplicationContext.cpp        |   7 ++
+ .../Application/ApplicationContext.h          |   3 +
+ .../Render/Drivers/FrameStream.cpp            | 113 ++++++++++++++++++
+ .../Render/Drivers/FrameStream.h              |  33 +++++
+ .../Render/Drivers/GLFWOpenGLDriver.cpp       |  31 ++++-
+ .../Render/Drivers/GLFWOpenGLDriver.h         |   3 +
+ .../Drivers/Output/GLFWWindowOutput.cpp       |   6 +-
+ 8 files changed, 192 insertions(+), 6 deletions(-)
+ create mode 100644 src/WallpaperEngine/Render/Drivers/FrameStream.cpp
+ create mode 100644 src/WallpaperEngine/Render/Drivers/FrameStream.h
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 11565a1f..6e1642fa 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -398,6 +398,8 @@ set(COMMON_SOURCES
+     src/WallpaperEngine/Render/Drivers/Output/OutputViewport.h
+     src/WallpaperEngine/Render/Drivers/GLFWOpenGLDriver.h
+     src/WallpaperEngine/Render/Drivers/GLFWOpenGLDriver.cpp
++    src/WallpaperEngine/Render/Drivers/FrameStream.h
++    src/WallpaperEngine/Render/Drivers/FrameStream.cpp
+     src/WallpaperEngine/Render/Drivers/VideoDriver.h
+     src/WallpaperEngine/Render/Drivers/VideoDriver.cpp
+     src/WallpaperEngine/Render/RenderContext.h
+diff --git a/src/WallpaperEngine/Application/ApplicationContext.cpp b/src/WallpaperEngine/Application/ApplicationContext.cpp
+index 66a957ce..b5f0e45f 100644
+--- a/src/WallpaperEngine/Application/ApplicationContext.cpp
++++ b/src/WallpaperEngine/Application/ApplicationContext.cpp
+@@ -501,6 +501,13 @@ void ApplicationContext::loadSettingsFromArgv () {
+ 	.flag ()
+ 	.store_into (this->settings.render.downscaleToOutput);
+ 
++    performanceGroup.add_argument ("--stream")
++	.help (
++	    "Renders without showing the window (needs --window for the size) and streams the frames live as "
++	    "H.264 (VA-API) in MPEG-TS to the given ffmpeg URL, e.g. udp://127.0.0.1:41234"
++	)
++	.store_into (this->settings.render.streamTarget);
++
+     performanceGroup.add_argument ("--no-fullscreen-pause")
+ 	.help ("Prevents the background pausing when an app is fullscreen")
+ 	.flag ()
+diff --git a/src/WallpaperEngine/Application/ApplicationContext.h b/src/WallpaperEngine/Application/ApplicationContext.h
+index de64fb7c..87c570f0 100644
+--- a/src/WallpaperEngine/Application/ApplicationContext.h
++++ b/src/WallpaperEngine/Application/ApplicationContext.h
+@@ -127,6 +127,8 @@ public:
+ 	    std::vector<std::string> fullscreenPauseIgnoreAppIds;
+ 	    /** Render scenes and videos bigger than the output at the output's resolution instead of their own */
+ 	    bool downscaleToOutput;
++	    /** Live H.264 stream target (ffmpeg URL) for the rendered frames, the window stays hidden */
++	    std::string streamTarget;
+ 	    /** Render debugging switches for scene compatibility work */
+ 	    struct {
+ 		bool baseOnly;
+@@ -206,6 +208,7 @@ public:
+             .pauseOnFullscreenOnlyWhenActive = false,
+             .fullscreenPauseIgnoreAppIds = {},
+             .downscaleToOutput = false,
++            .streamTarget = "",
+             .debug = {
+                 .baseOnly = false,
+                 .noSolidFinal = false,
+diff --git a/src/WallpaperEngine/Render/Drivers/FrameStream.cpp b/src/WallpaperEngine/Render/Drivers/FrameStream.cpp
+new file mode 100644
+index 00000000..709d82b4
+--- /dev/null
++++ b/src/WallpaperEngine/Render/Drivers/FrameStream.cpp
+@@ -0,0 +1,113 @@
++#include "FrameStream.h"
++
++#include "WallpaperEngine/Logging/Log.h"
++
++#include <GL/glew.h>
++
++#include <algorithm>
++#include <cerrno>
++#include <cstring>
++#include <csignal>
++#include <spawn.h>
++#include <sys/wait.h>
++#include <unistd.h>
++
++extern char** environ;
++
++using namespace WallpaperEngine::Render::Drivers;
++
++FrameStream::FrameStream (std::string target, int fps) : m_target (std::move (target)), m_fps (std::max (1, fps)) {
++    // a dead encoder must not take the engine down with it, write () reports EPIPE instead
++    signal (SIGPIPE, SIG_IGN);
++}
++
++FrameStream::~FrameStream () { this->stop (); }
++
++void FrameStream::start (int width, int height) {
++    int fds[2];
++
++    if (pipe (fds) != 0) {
++	sLog.exception ("Cannot create the stream pipe");
++    }
++
++    const std::string size = std::to_string (width) + "x" + std::to_string (height);
++    const std::string fps = std::to_string (this->m_fps);
++    // frames come bottom-up from glReadPixels; timestamps follow the wall clock so a slow frame doesn't make the
++    // stream run fast, the player keeps up with a live source
++    std::vector<std::string> args = {
++	"ffmpeg", "-hide_banner", "-loglevel", "error", "-use_wallclock_as_timestamps", "1", "-f", "rawvideo",
++	"-pix_fmt", "rgba", "-s", size, "-i", "-", "-vaapi_device", "/dev/dri/renderD128", "-vf",
++	"vflip,format=nv12,hwupload", "-c:v", "h264_vaapi", "-g", fps, "-bf", "0", "-bsf:v", "dump_extra", "-fps_mode", "passthrough",
++	"-f", "mpegts", this->m_target,
++    };
++    std::vector<char*> argv;
++    for (auto& arg : args) {
++	argv.push_back (arg.data ());
++    }
++    argv.push_back (nullptr);
++
++    posix_spawn_file_actions_t actions;
++    posix_spawn_file_actions_init (&actions);
++    posix_spawn_file_actions_adddup2 (&actions, fds[0], STDIN_FILENO);
++    posix_spawn_file_actions_addclose (&actions, fds[1]);
++
++    const int result = posix_spawnp (&this->m_child, "ffmpeg", &actions, nullptr, argv.data (), environ);
++    posix_spawn_file_actions_destroy (&actions);
++    close (fds[0]);
++
++    if (result != 0) {
++	close (fds[1]);
++	this->m_child = -1;
++	sLog.exception ("Cannot start ffmpeg for --stream: ", strerror (result));
++    }
++
++    this->m_pipe = fds[1];
++    this->m_width = width;
++    this->m_height = height;
++    this->m_pixels.resize (static_cast<size_t> (width) * height * 4);
++    sLog.out ("Streaming ", size, " to ", this->m_target);
++}
++
++void FrameStream::stop () {
++    if (this->m_pipe != -1) {
++	close (this->m_pipe);
++	this->m_pipe = -1;
++    }
++
++    if (this->m_child != -1) {
++	waitpid (this->m_child, nullptr, 0);
++	this->m_child = -1;
++    }
++}
++
++void FrameStream::pushFrame (int width, int height) {
++    if (width <= 0 || height <= 0) {
++	return;
++    }
++
++    if (width != this->m_width || height != this->m_height) {
++	this->stop ();
++	this->start (width, height);
++    }
++
++    glPixelStorei (GL_PACK_ALIGNMENT, 1);
++    glReadPixels (0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, this->m_pixels.data ());
++
++    const uint8_t* data = this->m_pixels.data ();
++    size_t left = this->m_pixels.size ();
++
++    while (left > 0) {
++	const ssize_t written = write (this->m_pipe, data, left);
++
++	if (written < 0) {
++	    if (errno == EINTR) {
++		continue;
++	    }
++
++	    sLog.exception ("The stream encoder stopped: ", strerror (errno));
++	}
++
++	data += written;
++	left -= static_cast<size_t> (written);
++    }
++}
+diff --git a/src/WallpaperEngine/Render/Drivers/FrameStream.h b/src/WallpaperEngine/Render/Drivers/FrameStream.h
+new file mode 100644
+index 00000000..8a9e012d
+--- /dev/null
++++ b/src/WallpaperEngine/Render/Drivers/FrameStream.h
+@@ -0,0 +1,33 @@
++#pragma once
++
++#include <cstdint>
++#include <string>
++#include <sys/types.h>
++#include <vector>
++
++namespace WallpaperEngine::Render::Drivers {
++/**
++ * Encodes the rendered frames into a live H.264 stream (VA-API, MPEG-TS) through an ffmpeg child process, so
++ * something else can show the wallpaper while the engine's own surface can't be seen (e.g. a lock screen)
++ */
++class FrameStream {
++public:
++    FrameStream (std::string target, int fps);
++    ~FrameStream ();
++
++    /** Reads the current draw framebuffer and sends it to the encoder, restarting it when the size changes */
++    void pushFrame (int width, int height);
++
++private:
++    void start (int width, int height);
++    void stop ();
++
++    std::string m_target;
++    int m_fps;
++    int m_width = 0;
++    int m_height = 0;
++    int m_pipe = -1;
++    pid_t m_child = -1;
++    std::vector<uint8_t> m_pixels;
++};
++} // namespace WallpaperEngine::Render::Drivers
+diff --git a/src/WallpaperEngine/Render/Drivers/GLFWOpenGLDriver.cpp b/src/WallpaperEngine/Render/Drivers/GLFWOpenGLDriver.cpp
+index 1527fc5e..2e29ff0f 100644
+--- a/src/WallpaperEngine/Render/Drivers/GLFWOpenGLDriver.cpp
++++ b/src/WallpaperEngine/Render/Drivers/GLFWOpenGLDriver.cpp
+@@ -47,8 +47,13 @@ GLFWOpenGLDriver::GLFWOpenGLDriver (const char* windowTitle, ApplicationContext&
+     glfwWindowHint (GLFW_OPENGL_DEBUG_CONTEXT, GL_TRUE);
+ #endif /* DEBUG */
+ 
+-    // create window, size doesn't matter as long as we don't show it
+-    this->m_window = glfwCreateWindow (640, 480, windowTitle, nullptr, nullptr);
++    // create window, size doesn't matter as long as we don't show it. A streamed window is never shown, so its
++    // framebuffer keeps the size it's created with
++    glm::ivec2 windowSize = { 640, 480 };
++    if (!context.settings.render.streamTarget.empty ()) {
++	windowSize = { context.settings.render.window.geometry.z, context.settings.render.window.geometry.w };
++    }
++    this->m_window = glfwCreateWindow (windowSize.x, windowSize.y, windowTitle, nullptr, nullptr);
+ 
+     if (this->m_window == nullptr) {
+ 	sLog.exception ("Cannot create window");
+@@ -62,6 +67,18 @@ GLFWOpenGLDriver::GLFWOpenGLDriver (const char* windowTitle, ApplicationContext&
+ 	sLog.error ("Failed to initialize GLEW: ", glewGetErrorString (result));
+     }
+ 
++    if (!context.settings.render.streamTarget.empty ()) {
++	if (context.settings.render.mode != ApplicationContext::EXPLICIT_WINDOW) {
++	    sLog.exception ("--stream needs --window to know the size to render at");
++	}
++
++	// the window is never shown, nothing must wait for it to be presented
++	glfwSwapInterval (0);
++	this->m_stream = std::make_unique<FrameStream> (
++	    context.settings.render.streamTarget, context.settings.render.maximumFPS
++	);
++    }
++
+     // setup output
+     if (context.settings.render.mode == ApplicationContext::EXPLICIT_WINDOW
+ 	|| context.settings.render.mode == ApplicationContext::NORMAL_WINDOW) {
+@@ -147,8 +164,14 @@ void GLFWOpenGLDriver::dispatchEventQueue () {
+     // TODO: AS THOSE, MORE THAN LIKELY, WILL REQUIRE OF A DIFFERENT PROCESSING RATE
+     // update the output with the given image
+     this->m_output->updateRender ();
+-    // do buffer swapping first
+-    glfwSwapBuffers (this->m_window);
++
++    if (this->m_stream != nullptr) {
++	// hidden window: read the frame back from the back buffer, there's nothing to present
++	this->m_stream->pushFrame (this->m_output->getFullWidth (), this->m_output->getFullHeight ());
++    } else {
++	// do buffer swapping first
++	glfwSwapBuffers (this->m_window);
++    }
+     // poll for events
+     glfwPollEvents ();
+     // increase frame counter
+diff --git a/src/WallpaperEngine/Render/Drivers/GLFWOpenGLDriver.h b/src/WallpaperEngine/Render/Drivers/GLFWOpenGLDriver.h
+index 60614005..a70ffa01 100644
+--- a/src/WallpaperEngine/Render/Drivers/GLFWOpenGLDriver.h
++++ b/src/WallpaperEngine/Render/Drivers/GLFWOpenGLDriver.h
+@@ -4,9 +4,11 @@
+ #include "WallpaperEngine/Application/WallpaperApplication.h"
+ #include "WallpaperEngine/Input/Drivers/GLFWMouseInput.h"
+ #include "WallpaperEngine/Render/Drivers/Detectors/FullScreenDetector.h"
++#include "WallpaperEngine/Render/Drivers/FrameStream.h"
+ #include "WallpaperEngine/Render/Drivers/VideoDriver.h"
+ #include <GL/glew.h>
+ #include <GLFW/glfw3.h>
++#include <memory>
+ 
+ namespace WallpaperEngine::Application {
+ class ApplicationContext;
+@@ -41,5 +43,6 @@ private:
+     Output::Output* m_output = nullptr;
+     GLFWwindow* m_window = nullptr;
+     uint32_t m_frameCounter = 0;
++    std::unique_ptr<FrameStream> m_stream = nullptr;
+ };
+ } // namespace WallpaperEngine::Render::Drivers
+\ No newline at end of file
+diff --git a/src/WallpaperEngine/Render/Drivers/Output/GLFWWindowOutput.cpp b/src/WallpaperEngine/Render/Drivers/Output/GLFWWindowOutput.cpp
+index bd84373b..5e9a4952 100644
+--- a/src/WallpaperEngine/Render/Drivers/Output/GLFWWindowOutput.cpp
++++ b/src/WallpaperEngine/Render/Drivers/Output/GLFWWindowOutput.cpp
+@@ -14,8 +14,10 @@ GLFWWindowOutput::GLFWWindowOutput (ApplicationContext& context, VideoDriver& dr
+ 	sLog.exception ("Initializing window output when not in output mode, how did you get here?!");
+     }
+ 
+-    // window should be visible
+-    driver.showWindow ();
++    // window should be visible, unless the frames are streamed somewhere else
++    if (this->m_context.settings.render.streamTarget.empty ()) {
++	driver.showWindow ();
++    }
+ 
+     if (this->m_context.settings.render.mode == Application::ApplicationContext::EXPLICIT_WINDOW) {
+ 	this->m_fullWidth = this->m_context.settings.render.window.geometry.z;
+-- 
+2.55.0
+

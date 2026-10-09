@@ -9,9 +9,9 @@ My setup for animated [Wallpaper Engine](https://store.steampowered.com/app/4319
 | Part | What it does |
 |---|---|
 | [dms-wallpaperengine-dashbridge](https://github.com/cerXXXX/dms-wallpaperengine-dashbridge) | DMS plugin (separate repo): the whole Workshop library in the DMS wallpaper picker, keeps the DMS wallpaper from covering the engine, video wallpapers on the lock screen |
-| [dms-wallpaperengine](https://github.com/cerXXXX/dms-wallpaperengine) | Fork of the Linux Wallpaper Engine DMS plugin (separate repo): **Downscale to Screen** toggle, stale screenshot timer fix |
-| [`engine/`](engine) | linux-wallpaperengine patches + PKGBUILD: zero-copy VA-API video, correct video frame pacing, video wallpapers rendered at the video's frame rate, `--downscale-to-output`, scene clocks/text and scripts that work |
-| [`dms-lock-screen/`](dms-lock-screen) | DMS patch + pacman hook: a video set as the lock screen wallpaper (or the desktop's Wallpaper Engine video) plays behind the clock and password field; a **Blur Wallpaper** toggle for the lock screen background |
+| [dms-wallpaperengine](https://github.com/cerXXXX/dms-wallpaperengine) | Fork of the Linux Wallpaper Engine DMS plugin (separate repo): **Downscale to Screen** toggle, per-scene render settings, live scenes on the lock screen, stale screenshot timer fix |
+| [`engine/`](engine) | linux-wallpaperengine patches + PKGBUILD: zero-copy VA-API video, correct video frame pacing, video wallpapers rendered at the video's frame rate, `--downscale-to-output`, scene clocks/text and scripts that work, `--stream` (live scenes for the lock screen) |
+| [`dms-lock-screen/`](dms-lock-screen) | DMS patch + pacman hook: a video set as the lock screen wallpaper (or the desktop's Wallpaper Engine video) plays behind the clock and password field, the desktop's Wallpaper Engine scene runs live there; a **Blur Wallpaper** toggle for the lock screen background |
 | [`system/`](system) | niri layer rule, `makepkg.conf` without `-debug` packages |
 
 ## Install from scratch
@@ -50,14 +50,16 @@ My setup for animated [Wallpaper Engine](https://store.steampowered.com/app/4319
    ```
    Rerun it after `git pull` to update an installed older version. With no custom lock screen wallpaper, a monitor
    showing a Wallpaper Engine **video** wallpaper plays the same video on the lock screen (the plugin fork publishes
-   it; `dms ipc call linuxWallpaperEngine lockVideos` shows what it publishes). The blur is switched in DMS
+   it; `dms ipc call linuxWallpaperEngine lockVideos` shows what it publishes), and a **scene** runs live: the plugin
+   streams it while locked (patched engine, plugin toggle **Live Scene on Lock Screen**, on by default;
+   `dms ipc call linuxWallpaperEngine lockStreams` shows the streams while locked). The blur is switched in DMS
    Settings → Lock Screen → Appearance → **Blur Wallpaper** (on by default, as in stock DMS).
 
 After that wallpapers are switched from the DMS dashboard (click the bar clock → Wallpapers).
 
 ## Engine patches
 
-All five apply on upstream `b016d7d` (pinned in the PKGBUILD).
+All six apply on upstream `b016d7d` (pinned in the PKGBUILD).
 
 - **0001 zero-copy VA-API.** `GLPlayer` created the libmpv render context without `MPV_RENDER_PARAM_WL_DISPLAY`, so mpv
   had no hwdec interop and fell back to `vaapi-copy`, copying every decoded frame through system memory. The Wayland
@@ -98,6 +100,12 @@ All five apply on upstream `b016d7d` (pinned in the PKGBUILD).
   Checked against the other ten installed scenes (screenshots before/after): no visible change except
   [3624053922](https://steamcommunity.com/sharedfiles/filedetails/?id=3624053922), which used to render black and now
   shows.
+- **0006 `--stream <url>`.** Renders without showing anything (the GLFW window is created at the `--window` size and
+  never mapped) and pipes every frame to an `ffmpeg` child that encodes it with VA-API H.264 into MPEG-TS at the URL
+  (`udp://127.0.0.1:41300`), wall-clock timestamps, SPS/PPS on every keyframe so a player can join any time. The
+  plugin fork uses it for the lock screen: while locked it starts one streaming engine per screen with a scene and
+  the patched lock screen plays the stream. About 20% of one core at 1080p30 for the 4K clock scene, only while
+  locked with the screens on.
 
 Measured on Intel Iris Xe (Tiger Lake), niri, one 1920x1080@60 output; rendered frames counted from
 `wl_surface.attach` with `WAYLAND_DEBUG=1`, CPU as a share of one core:
@@ -130,8 +138,10 @@ no longer applies, `prepare()` stops with the failing hunk.
 - `--downscale-to-output` sizes the framebuffers once, when the wallpaper loads; after changing the output's mode or
   scale the engine needs a restart.
 - A 24 fps video on a 60 Hz panel without VRR can't be shown evenly (3:2 pulldown).
-- Only video wallpapers animate on the lock screen. While the session is locked niri draws nothing but the lock
-  surface (ext-session-lock), so the engine's layer can't show through; scenes show their static screenshot.
+- While the session is locked niri draws nothing but the lock surface (ext-session-lock), so the engine's layer can't
+  show through. Videos play on the lock screen directly; scenes are rendered by a second engine and streamed
+  (0006), so a scene shows its static screenshot for the few seconds it takes to load (~10 s for the 4K clock scene)
+  and the stream runs ~1 s behind. Span groups keep the screenshot.
 
 ## Licenses
 

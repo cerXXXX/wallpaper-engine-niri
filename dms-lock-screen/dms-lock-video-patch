@@ -6,7 +6,7 @@ shell=/usr/share/quickshell/dms
 patchfile=/usr/local/share/dms-lock-video/lock-video-wallpaper.patch
 lock="$shell/Modules/Lock/LockScreenContent.qml"
 # only the current version of the patch has this; every version has lockVideoWallpaper
-marker=lockVideos
+marker=lockStreams
 
 if grep -q "$marker" "$lock"; then
     echo "dms-lock-video: already patched"
@@ -22,4 +22,4 @@ if ! patch -d "$shell" -p1 --dry-run -s < "$patchfile" >/dev/null; then
     exit 0
 fi
 patch -d "$shell" -p1 -s --no-backup-if-mismatch < "$patchfile"
-echo "dms-lock-video: lock screen patched (video wallpapers, engine video, blur toggle)"
+echo "dms-lock-video: lock screen patched (video wallpapers, engine video and live scenes, blur toggle)"

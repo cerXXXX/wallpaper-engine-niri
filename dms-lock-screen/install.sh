@@ -8,7 +8,7 @@ shell=/usr/share/quickshell/dms
 lock="$shell/Modules/Lock/LockScreenContent.qml"
 installed=/usr/local/share/dms-lock-video/lock-video-wallpaper.patch
 # only the current version of the patch has this (keep in sync with dms-lock-video-patch)
-marker=lockVideos
+marker=lockStreams
 
 # take out whatever version is applied, using the patch file it was applied from
 unpatch() {

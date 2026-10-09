@@ -20,7 +20,7 @@
  
 --- a/Modules/Lock/LockScreenContent.qml
 +++ b/Modules/Lock/LockScreenContent.qml
-@@ -241,9 +241,20 @@
+@@ -241,9 +241,27 @@
          id: wallpaperBackground
          anchors.fill: parent
  
@@ -33,6 +33,13 @@
 +            var vars = PluginService.globalVars["linuxWallpaperEngine"] || {};
 +            return (vars.lockVideos || {})[root.screenName] || "";
 +        }
++        // lockStreams: the scene the plugin renders while locked, streamed live (udp://...) by a second engine
++        readonly property string engineStream: {
++            if (root.hasCustomWallpaper || engineVideo !== "")
++                return "";
++            var vars = PluginService.globalVars["linuxWallpaperEngine"] || {};
++            return (vars.lockStreams || {})[root.screenName] || "";
++        }
          readonly property string wallpaperSource: {
              if (root.hasCustomWallpaper)
                  return root.encodeFileUrl(SettingsData.lockScreenWallpaperPath);
@@ -41,7 +48,7 @@
              var w = SessionData.getMonitorWallpaper(screenName);
              return (w && !w.startsWith("#")) ? encodeFileUrl(w) : "";
          }
-@@ -252,13 +263,16 @@
+@@ -252,13 +270,16 @@
                  return SettingsData.lockScreenWallpaperFillMode;
              return root.hasCustomWallpaper ? "Fill" : SessionData.getMonitorWallpaperFillMode(root.screenName);
          }
@@ -52,7 +59,7 @@
          asynchronous: false
  
 -        sourceComponent: fillModeName === "Scrolling" ? scrollWallpaperComp : plainWallpaperComp
-+        sourceComponent: isVideo ? videoWallpaperComp : fillModeName === "Scrolling" ? scrollWallpaperComp : plainWallpaperComp
++        sourceComponent: isVideo ? videoWallpaperComp : engineStream !== "" ? streamWallpaperComp : fillModeName === "Scrolling" ? scrollWallpaperComp : plainWallpaperComp
  
 -        layer.enabled: true
 +        // lockScreenWallpaperBlur: off draws the wallpaper sharp, without the offscreen blur layer
@@ -60,7 +67,7 @@
          layer.effect: MultiEffect {
              autoPaddingEnabled: false
              blurEnabled: true
-@@ -274,6 +288,31 @@
+@@ -274,6 +295,97 @@
              }
          }
      }
@@ -85,6 +92,72 @@
 +                        return;
 +                    videoLoader.item.source = wallpaperBackground.wallpaperSource;
 +                    videoLoader.item.play();
++                }
++            }
++        }
++    }
++
++    // lockStreams: the static screenshot until the live scene plays on top of it (the scene takes a few
++    // seconds to load); reconnects when the stream fails or ends
++    Component {
++        id: streamWallpaperComp
++        Item {
++            Loader {
++                anchors.fill: parent
++                sourceComponent: wallpaperBackground.fillModeName === "Scrolling" ? scrollWallpaperComp : plainWallpaperComp
++            }
++
++            Loader {
++                id: streamLoader
++                anchors.fill: parent
++                source: "VideoScreensaverPlayer.qml"
++                // 1 = MediaPlayer.PlayingState (QtMultimedia is only loaded through the player file)
++                opacity: item && item.hasVideo && item.playbackState === 1 ? 1 : 0
++                onLoaded: {
++                    item.source = wallpaperBackground.engineStream;
++                    item.play();
++                }
++
++                Behavior on opacity {
++                    NumberAnimation {
++                        duration: Theme.mediumDuration
++                        easing.type: Theme.standardEasing
++                    }
++                }
++
++                function reconnect() {
++                    if (!item || wallpaperBackground.engineStream === "")
++                        return;
++                    item.stop();
++                    item.source = "";
++                    item.source = wallpaperBackground.engineStream;
++                    item.play();
++                }
++
++                Timer {
++                    id: reconnectTimer
++                    interval: 2000
++                    onTriggered: streamLoader.reconnect()
++                }
++
++                Connections {
++                    target: streamLoader.item
++                    ignoreUnknownSignals: true
++                    function onErrorOccurred() {
++                        reconnectTimer.restart();
++                    }
++                    function onMediaStatusChanged() {
++                        // 6 = MediaPlayer.EndOfMedia: the engine went away and may come back
++                        if (streamLoader.item.mediaStatus === 6)
++                            reconnectTimer.restart();
++                    }
++                }
++
++                Connections {
++                    target: wallpaperBackground
++                    function onEngineStreamChanged() {
++                        streamLoader.reconnect();
++                    }
 +                }
 +            }
 +        }
