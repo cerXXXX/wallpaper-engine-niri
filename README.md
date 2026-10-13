@@ -10,7 +10,7 @@ My setup for animated [Wallpaper Engine](https://store.steampowered.com/app/4319
 |---|---|
 | [dms-wallpaperengine-dashbridge](https://github.com/cerXXXX/dms-wallpaperengine-dashbridge) | DMS plugin (separate repo): the whole Workshop library in the DMS wallpaper picker, keeps the DMS wallpaper from covering the engine, video wallpapers on the lock screen |
 | [dms-wallpaperengine](https://github.com/cerXXXX/dms-wallpaperengine) | Fork of the Linux Wallpaper Engine DMS plugin (separate repo): **Downscale to Screen** toggle, separate scene/video FPS, per-scene render settings, scene properties with readable choices (language picker, color picker, options of other languages hidden), **Layers & Effects** to turn parts of a scene off, live scenes on the lock screen, **Power Modes** per power profile (eco holds the wallpaper still with live clocks), stale screenshot timer fix |
-| [`engine/`](engine) | linux-wallpaperengine patches + PKGBUILD: zero-copy VA-API video, correct video frame pacing, video wallpapers rendered at the video's frame rate, `--downscale-to-output`, scene clocks/text and scripts that work, `--stream` (live scenes for the lock screen), hidden layers not loaded and layers/effects the user can turn off, a first-frame marker, `--eco` (held still, redrawn only when a clock changes) with a control channel and sound fades, which layers show the time or date |
+| [`engine/`](engine) | PKGBUILD of the linux-wallpaperengine fork ([cerXXXX/linux-wallpaperengine](https://github.com/cerXXXX/linux-wallpaperengine)): zero-copy VA-API video, correct video frame pacing, video wallpapers rendered at the video's frame rate, `--downscale-to-output`, scene clocks/text and scripts that work, `--stream` (live scenes for the lock screen), hidden layers not loaded and layers/effects the user can turn off, a first-frame marker, `--eco` (held still, redrawn only when a clock changes) with a control channel and sound fades, which layers show the time or date |
 | [`dms-lock-screen/`](dms-lock-screen) | DMS patch, applied by the dms user service to a copy of its UI at every start: a video set as the lock screen wallpaper (or the desktop's Wallpaper Engine video) plays behind the clock and password field, the desktop's Wallpaper Engine scene runs live there (held still with live clocks in eco); a **Blur Wallpaper** toggle for the lock screen background; the system time and date step aside when the scene shows its own |
 | [`niri/`](niri) | niri patch + PKGBUILD (`niri-lock-wallpaper`): the running wallpaper shows under a see-through lock screen the moment the session locks |
 | [`system/`](system) | niri layer rule, `makepkg.conf` without `-debug` packages |
@@ -26,7 +26,7 @@ cd wallpaper-engine-niri
 Updating later: `git pull && ./install.sh`. The script, run as your user (it asks for sudo itself):
 
 - builds and installs the patched engine with `makepkg -si` on all cores, unless that version is already installed
-  (the previous build in `engine/src` is reused, so a new patch only compiles what it changed; `rm -rf engine/src`
+  (the previous build in `engine/src` is reused, so a new engine commit only compiles what it changed; `rm -rf engine/src`
   for a clean build);
 - clones both DMS plugins into `~/.config/DankMaterialShell/plugins`, or updates existing checkouts with
   `git pull --ff-only` (a checkout of the upstream plugin is switched to the fork first; one on another branch or
@@ -109,20 +109,29 @@ below) and the plugin settings (step 5) are still up to you.
 
 After that wallpapers are switched from the DMS dashboard (click the bar clock → Wallpapers).
 
-## Engine patches
+## Engine changes
 
-All seven apply on upstream `b016d7d` (pinned in the PKGBUILD).
+The engine is built from the fork [cerXXXX/linux-wallpaperengine](https://github.com/cerXXXX/linux-wallpaperengine):
+upstream `b016d7d` plus one commit per change below (the numbers are the commits' order; `engine/PKGBUILD` pins
+the fork's commit). Development happens in a clone of the fork, upstream is merged in from there:
 
-- **0001 zero-copy VA-API.** `GLPlayer` created the libmpv render context without `MPV_RENDER_PARAM_WL_DISPLAY`, so mpv
+```sh
+git clone https://github.com/cerXXXX/linux-wallpaperengine engine-dev   # ignored by this repo
+cd engine-dev && git remote add upstream https://github.com/Almamu/linux-wallpaperengine
+git fetch upstream && git merge upstream/main                             # new upstream changes
+# commit, push to the fork, then in engine/PKGBUILD: _commit=<new hash>, pkgver=r<git rev-list --count HEAD>.<short hash>
+```
+
+- **[0001](https://github.com/cerXXXX/linux-wallpaperengine/commit/a5907a19) zero-copy VA-API.** `GLPlayer` created the libmpv render context without `MPV_RENDER_PARAM_WL_DISPLAY`, so mpv
   had no hwdec interop and fell back to `vaapi-copy`, copying every decoded frame through system memory. The Wayland
   driver now exposes its `wl_display` and mpv decodes with `vaapi`.
-- **0002 video frame pacing.** `mpv_render_context_render ()` blocked until the next video frame was due
+- **[0002](https://github.com/cerXXXX/linux-wallpaperengine/commit/1c660c08) video frame pacing.** `mpv_render_context_render ()` blocked until the next video frame was due
   (`BLOCK_FOR_TARGET_TIME` defaults to 1) on top of the engine's own pacing, so some videos updated far below their
   frame rate. Pacing is left to the engine.
-- **0003 video frame rate cap.** With 0002, a 24 fps video was redrawn at `--fps` (30). The engine now reads
+- **[0003](https://github.com/cerXXXX/linux-wallpaperengine/commit/132a2122) video frame rate cap.** With 0002, a 24 fps video was redrawn at `--fps` (30). The engine now reads
   `container-fps` and, when every output shows a plain video, renders at the fastest video's rate; `--fps` stays the
   upper bound, scenes and web wallpapers are unaffected.
-- **0004 `--downscale-to-output`.** Scenes render into framebuffers the size of their projection, and every image layer
+- **[0004](https://github.com/cerXXXX/linux-wallpaperengine/commit/04d01a2e) `--downscale-to-output`.** Scenes render into framebuffers the size of their projection, and every image layer
   with effects into framebuffers the size of its texture, so a 3840x2160 scene on a 1920x1080 screen does all its
   passes at four times the pixels the screen shows; videos are drawn to a texture of the video's size. With the flag
   (the plugin's **Downscale to Screen** toggle) a wallpaper bigger than its output renders at the output's
@@ -132,7 +141,7 @@ All seven apply on upstream `b016d7d` (pinned in the PKGBUILD).
   screen's pixel ratio. Nothing is scaled up, and screenshots (the plugin's static wallpaper) read the framebuffer at
   its real size. Effects keep their size on screen (`g_TexelSize` stays in scene units); a 1:1 crop of the 4K scene
   looks the same at both resolutions.
-- **0005 scene clocks, compose layers, scripts.** Found on a clock + audio visualizer scene
+- **[0005](https://github.com/cerXXXX/linux-wallpaperengine/commit/038f56cf) scene clocks, compose layers, scripts.** Found on a clock + audio visualizer scene
   ([3299228616](https://steamcommunity.com/sharedfiles/filedetails/?id=3299228616)), the fixes are generic:
   - compose layers with `"copybackground": false` start transparent (`CLEARALPHA`); before, their scroll/fisheye effects
     moved a copy of the background around, which showed up as broken rectangles over the clock;
@@ -152,13 +161,13 @@ All seven apply on upstream `b016d7d` (pinned in the PKGBUILD).
   Checked against the other ten installed scenes (screenshots before/after): no visible change except
   [3624053922](https://steamcommunity.com/sharedfiles/filedetails/?id=3624053922), which used to render black and now
   shows.
-- **0006 `--stream <url>`.** Renders without showing anything (the GLFW window is created at the `--window` size and
+- **[0006](https://github.com/cerXXXX/linux-wallpaperengine/commit/ff844901) `--stream <url>`.** Renders without showing anything (the GLFW window is created at the `--window` size and
   never mapped) and pipes every frame to an `ffmpeg` child that encodes it with VA-API H.264 into MPEG-TS at the URL
   (`udp://127.0.0.1:41300`), wall-clock timestamps, SPS/PPS on every keyframe so a player can join any time. The
   plugin fork uses it for the lock screen: while locked it starts one streaming engine per screen with a scene and
   the patched lock screen plays the stream. About 20% of one core at 1080p30 for the 4K clock scene, only while
   locked with the screens on.
-- **0007 hidden layers aren't loaded.** Properties are applied once at startup, so a layer hidden by one (another
+- **[0007](https://github.com/cerXXXX/linux-wallpaperengine/commit/6d94b005) hidden layers aren't loaded.** Properties are applied once at startup, so a layer hidden by one (another
   language, another clock layout) or by the scene's author, with no script that could show it again, stays hidden for
   the whole run. Such layers are now left out of the scene together with everything inside them, unless a visible
   layer depends on them. The multi-language clock scene above is six full copies of itself (one per language), each
@@ -169,13 +178,13 @@ All seven apply on upstream `b016d7d` (pinned in the PKGBUILD).
     `--set-property` values;
   - `--hide-layer ID[,ID...]` hides a layer and everything inside it (not loaded either);
   - `--disable-effect ID[,ID...]` turns a layer effect off.
-- **0008 first-frame marker.** Prints `First frame presented` once niri has shown a frame with the wallpaper's
+- **[0008](https://github.com/cerXXXX/linux-wallpaperengine/commit/2a4209aa) first-frame marker.** Prints `First frame presented` once niri has shown a frame with the wallpaper's
   content on every screen of the process (the Wayland frame callback of that frame; a video counts from mpv's first
   decoded frame, `MPV_EVENT_PLAYBACK_RESTART`, not the empty texture before it). The plugin fork freezes paused
   wallpapers (power saver, battery) with SIGSTOP only after it, so a cold start while paused still shows the
   wallpaper instead of an empty screen. Measured: 0.6 s for a 1080p video, 1.9 s for the clock scene, 3.7 s for the
   4K Big Sur scene.
-- **0009 eco mode, control channel, sound fades.**
+- **[0009](https://github.com/cerXXXX/linux-wallpaperengine/commit/14bf1b0a) eco mode, control channel, sound fades.**
   - `--eco` holds the wallpaper still once its first frame has been up for a second. The animation time stops
     (particles, shaders, texture animations; videos pause), scripts keep reading the real time. Every second, just
     after the second changes, the frame is rendered and hashed and only shown when it changed: a clock with seconds
@@ -193,15 +202,15 @@ All seven apply on upstream `b016d7d` (pinned in the PKGBUILD).
   - Measured (CPU of one core, 15 FPS, 75 s): the clock scene 2.2% and ~15 frames/s normally, 0.37% and one frame a
     minute (on the minute) with `--eco`; the 1080p video 2.5% → 0.33%.
 
-- **0010 ropetrail.** `ropetrail` particles went through the rope renderer, which joins all of an emitter's
+- **[0010](https://github.com/cerXXXX/linux-wallpaperengine/commit/e46f0e84) ropetrail.** `ropetrail` particles went through the rope renderer, which joins all of an emitter's
   particles in spawn order: the clock scene's shooting stars were joined by thin lines across the screen in about
   every other frame (on the desktop too, most visible on the lock screen). Each particle now draws its own trail
   through the positions it had over the renderer's length.
 
-- **0011 stream keyframes.** `--stream` sends a keyframe every third of a second instead of every second. A player
+- **[0011](https://github.com/cerXXXX/linux-wallpaperengine/commit/504bcc54) stream keyframes.** `--stream` sends a keyframe every third of a second instead of every second. A player
   joining the live stream (the lock screen) decodes garbage until the next keyframe, and over UDP the first GOP is
   always broken; it now lasts ~0.3 s, so the lock screen shows the live scene ~1.4 s sooner.
-- **0012 clocks in `--list-layers`.** Each layer gets `"clock": {"time", "date"}`: one of its property scripts reads
+- **[0012](https://github.com/cerXXXX/linux-wallpaperengine/commit/8b291f1e) clocks in `--list-layers`.** Each layer gets `"clock": {"time", "date"}`: one of its property scripts reads
   the clock (`new Date`, `Date.now`, `engine.timeOfDay`) and asks for hours/minutes/seconds (time) or
   day/month/year (date). The plugin uses it to tell the lock screen to leave out its own time and date when the
   scene already shows them. On the multi-language clock scene: 90 of 271 layers, of which the visible ones are the

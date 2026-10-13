@@ -1,64 +1,33 @@
-# Based on the AUR linux-wallpaperengine-git PKGBUILD (Maintainer: Alexis Maiquez <aur@almamu.com>),
-# with the patches from this directory applied on top of a pinned upstream commit.
+# Based on the AUR linux-wallpaperengine-git PKGBUILD (Maintainer: Alexis Maiquez <aur@almamu.com>), built from
+# the fork with the changes as commits (https://github.com/cerXXXX/linux-wallpaperengine, upstream b016d7d + our
+# commits). Updating the engine: point _commit at the fork's new commit and set pkgver to r<count>.<short hash>.
 pkgname=linux-wallpaperengine-git
 _pkgname=linux-wallpaperengine
-_commit=b016d7d1fdcf4e5fd2f9c9fa420a8aaa07fee02d
-pkgver=r627.b016d7d1
-pkgrel=10
-pkgdesc="use steam's wallpaperengine on linux (patched: zero-copy VA-API, video frame pacing, --downscale-to-output, scene text/script fixes, --stream, hidden layers not loaded, first-frame marker)"
+_commit=8b291f1e87d08d16084377262e187624491de71b
+pkgver=r639.8b291f1e
+pkgrel=1
+pkgdesc="use steam's wallpaperengine on linux (cerXXXX fork for niri: zero-copy VA-API, video frame pacing, --downscale-to-output, working scene clocks/scripts, --stream, --eco, --list-layers)"
 arch=('x86_64')
-url="https://github.com/Almamu/linux-wallpaperengine"
+url="https://github.com/cerXXXX/linux-wallpaperengine"
 license=('GPL-3.0-only')
 depends=('lz4' 'ffmpeg' 'mpv' 'glfw' 'glew' 'freeglut' 'libpulse' 'libcups' 'at-spi2-core' 'nss' 'libxcomposite' 'libxdamage' 'nspr')
 makedepends=('git' 'cmake' 'sdl2' 'glm' 'wayland-protocols' 'xorg-xrandr')
 provides=("linux-wallpaperengine")
-source=("${pkgname}::git+https://github.com/Almamu/linux-wallpaperengine.git#commit=${_commit}"
-        "0001-perf-pass-the-Wayland-display-to-mpv-so-VA-API-decod.patch"
-        "0002-fix-don-t-let-mpv-sleep-inside-the-render-loop.patch"
-        "0003-perf-render-video-wallpapers-at-the-video-s-frame-ra.patch"
-        "0004-perf-add-downscale-to-output-to-render-big-wallpaper.patch"
-        "0005-fix-scene-clocks-compose-layers-and-property-scripts.patch"
-        "0006-feat-stream-renders-without-a-window-and-streams-the.patch"
-        "0007-perf-don-t-load-scene-layers-that-stay-hidden-let-us.patch"
-        "0008-feat-print-First-frame-presented-once-the-compositor.patch"
-        "0009-feat-eco-holds-the-wallpaper-still-and-shows-a-frame.patch"
-        "0010-fix-ropetrail-draws-a-trail-behind-each-particle-ins.patch"
-        "0011-perf-stream-sends-a-keyframe-three-times-a-second.patch"
-        "0012-feat-list-layers-tells-which-layers-show-the-time-or.patch")
-sha256sums=('faaa2b137b5fb61769ffb0687ae87bb45294556904e96e76b8a46b16f0c522a6'
-            '13f211c88024a1f509b0e4b9ab8470b9b836e8657dec644623cff2ba5b481aeb'
-            '6764e27aedc9a98bd2db74d6184863bb2fab167c159ae0ee0940225fb50a819c'
-            'fc023c969d02047a7538d7dda1f5ca78e6d961ca8d5ac4a240cf462734d7197c'
-            'f45f0a613d2e6060f7cf0752186d5af2d47356eefd8834c6181af6a6ddf17fd9'
-            '007042c3ed3f9586e01e5beee02f94e7339a1e048c8de1c99e0fd61d0bc5a94f'
-            '9b619a81509adda63319c1ada04f3c0fda657c40d4a5a910f175c865a12e5684'
-            'e653ab7a3073d18454029a197b4b3fa2fd979d3e9fd80c18b3e5b4180d1a8041'
-            '3014c716a6baa42e00efe69b858fd086d0496aec046da2cfb4e47c51c1fb8363'
-            '09c5e2c8dc2876f69027baf244d2fabf401abcea1c0a1add2ea5ddc7d1094ca6'
-            '2d22e89399460341f5bfc4714528074fbb1a2450bb264448974d2457777c1d4c'
-            '98d4494be5b53c1bcbb6e0bf5a57fe077f7120ffc5229314f6908cde5bf20c5b'
-            '6de626adf8c2d6ce16cf2372bd37d0cfbcedbabc958dd9a748c07c61df430b55')
+source=("${_pkgname}-niri::git+https://github.com/cerXXXX/linux-wallpaperengine.git#commit=${_commit}")
+sha256sums=('SKIP')
 
 pkgver() {
-    cd "$pkgname"
-    printf "r%s.%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+    cd "${_pkgname}-niri"
+    printf "r%s.%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short=8 HEAD)"
 }
 
 prepare() {
-    cd "$pkgname"
-    # an older build's src dir is reused (only what changed is compiled again): makepkg's checkout restores the
-    # patched files, the files the patches create are removed here
-    git clean -fdq -e .claude
+    cd "${_pkgname}-niri"
     git submodule update --init --recursive
-    git -c protocol.file.allow=always submodule update
-
-    for patch in "$srcdir"/0*.patch; do
-        patch -Np1 -i "$patch"
-    done
 }
 
 build() {
-    cmake -B build -S "$pkgname" \
+    cmake -B build -S "${_pkgname}-niri" \
         -DCMAKE_BUILD_TYPE='Release' \
         -DCMAKE_INSTALL_PREFIX="/opt/${_pkgname}" \
         -Wno-dev \
