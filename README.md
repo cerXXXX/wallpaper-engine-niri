@@ -11,7 +11,7 @@ My setup for animated [Wallpaper Engine](https://store.steampowered.com/app/4319
 | [dms-wallpaperengine-dashbridge](https://github.com/cerXXXX/dms-wallpaperengine-dashbridge) | DMS plugin (separate repo): the whole Workshop library in the DMS wallpaper picker, keeps the DMS wallpaper from covering the engine, video wallpapers on the lock screen |
 | [dms-wallpaperengine](https://github.com/cerXXXX/dms-wallpaperengine) | Fork of the Linux Wallpaper Engine DMS plugin (separate repo): **Downscale to Screen** toggle, separate scene/video FPS, per-scene render settings, scene properties with readable choices (language picker, color picker, options of other languages hidden), **Layers & Effects** to turn parts of a scene off, live scenes on the lock screen, **Power Modes** per power profile (eco holds the wallpaper still with live clocks), stale screenshot timer fix |
 | [`engine/`](engine) | linux-wallpaperengine patches + PKGBUILD: zero-copy VA-API video, correct video frame pacing, video wallpapers rendered at the video's frame rate, `--downscale-to-output`, scene clocks/text and scripts that work, `--stream` (live scenes for the lock screen), hidden layers not loaded and layers/effects the user can turn off, a first-frame marker, `--eco` (held still, redrawn only when a clock changes) with a control channel and sound fades |
-| [`dms-lock-screen/`](dms-lock-screen) | DMS patch + pacman hook: a video set as the lock screen wallpaper (or the desktop's Wallpaper Engine video) plays behind the clock and password field, the desktop's Wallpaper Engine scene runs live there (held still with live clocks in eco); a **Blur Wallpaper** toggle for the lock screen background |
+| [`dms-lock-screen/`](dms-lock-screen) | DMS patch, applied by the dms user service to a copy of its UI at every start: a video set as the lock screen wallpaper (or the desktop's Wallpaper Engine video) plays behind the clock and password field, the desktop's Wallpaper Engine scene runs live there (held still with live clocks in eco); a **Blur Wallpaper** toggle for the lock screen background |
 | [`system/`](system) | niri layer rule, `makepkg.conf` without `-debug` packages |
 
 ## Install or update everything
@@ -30,7 +30,7 @@ Updating later: `git pull && ./install.sh`. The script, run as your user (it ask
 - clones both DMS plugins into `~/.config/DankMaterialShell/plugins`, or updates existing checkouts with
   `git pull --ff-only` (a checkout of the upstream plugin is switched to the fork first; one on another branch or
   with local changes is left alone with a warning);
-- installs or updates the lock screen patch (`sudo bash dms-lock-screen/install.sh`);
+- installs or updates the lock screen patch (`bash dms-lock-screen/install.sh`, a drop-in for the dms user service);
 - warns if the niri layer rule is missing from `~/.config/niri/config.kdl` (it doesn't edit your config);
 - restarts DMS and enables newly cloned plugins.
 
@@ -68,10 +68,15 @@ below) and the plugin settings (step 5) are still up to you.
 6. **niri:** add [`system/niri-layer-rule.kdl`](system/niri-layer-rule.kdl) to `~/.config/niri/config.kdl`.
 7. **Lock screen video and blur toggle** (optional):
    ```sh
-   sudo bash dms-lock-screen/install.sh   # uninstall: sudo bash dms-lock-screen/install.sh uninstall
+   bash dms-lock-screen/install.sh   # uninstall: bash dms-lock-screen/install.sh uninstall
    dms restart
    ```
-   Rerun it after `git pull` to update an installed older version. With no custom lock screen wallpaper, a monitor
+   DMS 1.6+ carries its UI inside the `dms` binary, so nothing under `/usr` is patched: a drop-in for the `dms` user
+   service (`~/.config/systemd/user/dms.service.d/lock-screen.conf`) runs `dms-lock-ui` before every DMS start. It
+   unpacks the binary's UI, applies the patch to a copy in `$XDG_RUNTIME_DIR/dms-lock-ui` and points DMS at it
+   (`DMS_SHELL_DIR`). A dms-shell upgrade gets the patch on the next start; if the patch doesn't fit a new DMS, DMS
+   runs its stock UI (`journalctl --user -u dms | grep dms-lock-ui` says why). The pacman hook of older versions is
+   removed (sudo). Rerun it after `git pull` to update. With no custom lock screen wallpaper, a monitor
    showing a Wallpaper Engine **video** wallpaper plays the same video on the lock screen (the plugin fork publishes
    it; `dms ipc call linuxWallpaperEngine lockVideos` shows what it publishes), and a **scene** runs live: the plugin
    streams it while locked (patched engine, plugin toggle **Live Scene on Lock Screen**, on by default;
