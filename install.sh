@@ -108,8 +108,8 @@ done
 
 # --- lock screen
 if [ "$do_lock" = 1 ]; then
-    step "Lock screen patch (sudo)"
-    sudo bash "$here/dms-lock-screen/install.sh"
+    step "Lock screen patch"
+    bash "$here/dms-lock-screen/install.sh" || warn "the lock screen patch doesn't fit this DMS version, the lock screen stays stock"
 fi
 
 # --- niri: the rule can't be merged into someone's config blindly, so only check for it

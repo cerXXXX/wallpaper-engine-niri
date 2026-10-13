@@ -1,6 +1,6 @@
 --- a/Common/settings/SettingsSpec.js
 +++ b/Common/settings/SettingsSpec.js
-@@ -465,6 +465,7 @@
+@@ -511,6 +511,7 @@
      lockScreenVideoCycling: { def: false },
      lockScreenWallpaperPath: { def: "" },
      lockScreenWallpaperFillMode: { def: "" },
@@ -10,7 +10,7 @@
  
 --- a/Common/SettingsData.qml
 +++ b/Common/SettingsData.qml
-@@ -906,6 +906,7 @@
+@@ -966,6 +966,7 @@
      property bool lockScreenVideoCycling: false
      property string lockScreenWallpaperPath: ""
      property string lockScreenWallpaperFillMode: ""
@@ -20,7 +20,7 @@
  
 --- a/Modules/Lock/LockScreenContent.qml
 +++ b/Modules/Lock/LockScreenContent.qml
-@@ -241,9 +241,35 @@
+@@ -256,9 +256,35 @@
          id: wallpaperBackground
          anchors.fill: parent
  
@@ -56,14 +56,14 @@
              var w = SessionData.getMonitorWallpaper(screenName);
              return (w && !w.startsWith("#")) ? encodeFileUrl(w) : "";
          }
-@@ -252,13 +278,16 @@
-                 return SettingsData.lockScreenWallpaperFillMode;
-             return root.hasCustomWallpaper ? "Fill" : SessionData.getMonitorWallpaperFillMode(root.screenName);
-         }
+@@ -270,13 +296,16 @@
+ 
+         readonly property real screenScale: CompositorService.getScreenScale(Quickshell.screens.find(s => s.name === root.screenName) ?? null)
+         readonly property size decodeSize: Qt.size(Math.round(width * screenScale), Math.round(height * screenScale))
 +        // lockVideoWallpaper: a video set as the lock screen wallpaper plays as a looping background
 +        readonly property bool isVideo: engineVideo !== "" || (root.hasCustomWallpaper && /\.(mp4|mkv|webm|mov|avi|m4v)$/i.test(SettingsData.lockScreenWallpaperPath))
  
-         active: wallpaperSource !== ""
+         active: wallpaperSource !== "" && width > 0 && height > 0
          asynchronous: false
  
 -        sourceComponent: fillModeName === "Scrolling" ? scrollWallpaperComp : plainWallpaperComp
@@ -75,7 +75,7 @@
          layer.effect: MultiEffect {
              autoPaddingEnabled: false
              blurEnabled: true
-@@ -274,6 +303,145 @@
+@@ -292,6 +321,145 @@
              }
          }
      }
@@ -223,7 +223,7 @@
          id: plainWallpaperComp
 --- a/Modules/Settings/LockScreenTab.qml
 +++ b/Modules/Settings/LockScreenTab.qml
-@@ -391,6 +391,15 @@
+@@ -414,6 +414,15 @@
                      onPathSelected: path => SettingsData.set("lockScreenWallpaperPath", path)
                      onFillModeSelected: mode => SettingsData.set("lockScreenWallpaperFillMode", mode)
                  }

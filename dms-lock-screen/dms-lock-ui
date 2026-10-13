@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# Builds the patched DMS UI for the lock screen. Runs before every start of the dms user service
+# (ExecStartPre in dms.service.d/lock-screen.conf), so a dms-shell upgrade gets the patch on the next start.
+#
+# DMS 1.6+ carries its QML inside the dms binary and unpacks it under $XDG_RUNTIME_DIR; another UI is run
+# from $DMS_SHELL_DIR. This unpacks the binary's own UI, applies lock-video-wallpaper.patch to a copy and
+# writes DMS_SHELL_DIR=<copy> to $XDG_RUNTIME_DIR/dms-lock-ui.env, which the service reads. When anything
+# fails (say the patch no longer fits a new DMS) there is no env file and DMS runs its stock UI.
+set -u
+here=$(cd "$(dirname "$0")" && pwd)
+patchfile=$here/lock-video-wallpaper.patch
+runtime=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
+env_file=$runtime/dms-lock-ui.env
+base=$runtime/dms-lock-ui
+
+log() { echo "dms-lock-ui: $*" >&2; }
+
+rm -f "$env_file"
+
+# a dms command that needs the UI and finds no running DMS (an empty runtime dir) unpacks the embedded UI
+# there; the ipc call itself then fails, there is nothing to talk to
+probe=$(mktemp -d "$runtime/dms-lock-ui-probe.XXXXXX") || exit 0
+trap 'chmod -R u+w "$probe" 2>/dev/null; rm -rf "$probe"' EXIT
+env -u DMS_SHELL_DIR XDG_RUNTIME_DIR="$probe" timeout 30 dms ipc call dms-lock-ui probe >/dev/null 2>&1
+stock=
+for d in "$probe"/*-shell/*/; do
+    [ -f "$d/shell.qml" ] && stock=${d%/}
+done
+if [ -z "$stock" ]; then
+    log "couldn't unpack the UI from the dms binary, DMS runs its stock UI"
+    exit 0
+fi
+version=$(cat "$stock/VERSION" 2>/dev/null)
+
+# one copy per DMS build and patch version
+rev=$(cat "$stock/.dankrev" 2>/dev/null || basename "$stock")
+target=$base/$rev-$(sha256sum < "$patchfile" | cut -c1-12)
+if [ ! -f "$target/shell.qml" ]; then
+    mkdir -p "$base"
+    rm -rf "$base/.build"
+    if ! cp -a "$stock" "$base/.build" || ! chmod -R u+w "$base/.build"; then
+        log "couldn't copy the UI to $base, DMS runs its stock UI"
+        rm -rf "$base/.build"
+        exit 0
+    fi
+    if ! patch -d "$base/.build" -p1 -s --no-backup-if-mismatch < "$patchfile" >/dev/null; then
+        log "the lock screen patch doesn't fit DMS $version, DMS runs its stock lock screen"
+        rm -rf "$base/.build"
+        exit 0
+    fi
+    mv "$base/.build" "$target"
+fi
+
+# copies of older builds, unless a running DMS still uses one (the lock screen loads its files when locking)
+for d in "$base"/*/; do
+    d=${d%/}
+    [ "$d" = "$target" ] && continue
+    pgrep -f -- "-p $d\$" >/dev/null || rm -rf "$d"
+done
+
+echo "DMS_SHELL_DIR=$target" > "$env_file"
+log "DMS $version runs with the lock screen patch ($target)"
