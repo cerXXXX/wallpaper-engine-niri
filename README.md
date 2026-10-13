@@ -12,6 +12,7 @@ My setup for animated [Wallpaper Engine](https://store.steampowered.com/app/4319
 | [dms-wallpaperengine](https://github.com/cerXXXX/dms-wallpaperengine) | Fork of the Linux Wallpaper Engine DMS plugin (separate repo): **Downscale to Screen** toggle, separate scene/video FPS, per-scene render settings, scene properties with readable choices (language picker, color picker, options of other languages hidden), **Layers & Effects** to turn parts of a scene off, live scenes on the lock screen, **Power Modes** per power profile (eco holds the wallpaper still with live clocks), stale screenshot timer fix |
 | [`engine/`](engine) | PKGBUILD of the linux-wallpaperengine fork ([cerXXXX/linux-wallpaperengine](https://github.com/cerXXXX/linux-wallpaperengine)): zero-copy VA-API video, correct video frame pacing, video wallpapers rendered at the video's frame rate, `--downscale-to-output`, scene clocks/text and scripts that work, `--stream` (live scenes for the lock screen), hidden layers not loaded and layers/effects the user can turn off, a first-frame marker, `--eco` (held still, redrawn only when a clock changes) with a control channel and sound fades, which layers show the time or date |
 | [`dms-lock-screen/`](dms-lock-screen) | DMS patch, applied by the dms user service to a copy of its UI at every start: a video set as the lock screen wallpaper (or the desktop's Wallpaper Engine video) plays behind the clock and password field, the desktop's Wallpaper Engine scene runs live there (held still with live clocks in eco); a **Blur Wallpaper** toggle for the lock screen background (live wallpapers take the plugin's own); the system time and date step aside when the scene shows its own and the plugin says so |
+| [`dms-greeter/`](dms-greeter) | The login screen (greetd + dms-greeter) with the live scene: greetd runs a wrapper that patches a copy of dms-greeter's UI, which starts the scene the plugin names under it, with the lock screen's blur, time and date |
 | [`niri/`](niri) | niri patch + PKGBUILD (`niri-lock-wallpaper`): the running wallpaper shows under a see-through lock screen the moment the session locks |
 | [`system/`](system) | niri layer rule, `makepkg.conf` without `-debug` packages |
 
@@ -35,10 +36,12 @@ Updating later: `git pull && ./install.sh`. The script, run as your user (it ask
 - builds and installs niri with the lock screen patch (`niri-lock-wallpaper`, replaces the `niri` package: pacman
   asks), unless that version is already installed; warns when Arch's niri is newer than `niri/PKGBUILD`. The new
   niri runs after the next login;
+- installs or updates the live scene on the login screen when dms-greeter is installed (`bash dms-greeter/install.sh`:
+  points greetd's command at the wrapper, gives the greeter group passage through `~/.local/share/Steam`);
 - warns if the niri layer rule is missing from `~/.config/niri/config.kdl` (it doesn't edit your config);
 - restarts DMS and enables newly cloned plugins.
 
-Options: `--no-engine`, `--rebuild-engine`, `--no-niri`, `--no-lock-screen`, `--no-restart`. Wallpaper Engine itself (step 1
+Options: `--no-engine`, `--rebuild-engine`, `--no-niri`, `--no-lock-screen`, `--no-greeter`, `--no-restart`. Wallpaper Engine itself (step 1
 below) and the plugin settings (step 5) are still up to you.
 
 ## Install by hand
@@ -110,7 +113,20 @@ below) and the plugin settings (step 5) are still up to you.
    under the patched niri — and the lock screen shows its own, as for scenes without one. The plugin tells which
    scenes show what (`dms ipc call linuxWallpaperEngine lockClocks`, the hidden layers in `lockClockLayers`),
    detected from the layers' scripts, per scene in Scene Settings → *Clock on the Lock Screen*; the screenshot shown
-   until the scene is up keeps the system clock, its own clock is stale.
+   until the scene is up keeps the system clock, its own clock is stale. With the blur on both count as off: a
+   blurred clock can't be read.
+8. **Login screen** (optional, greetd + dms-greeter): `bash dms-greeter/install.sh` (`uninstall` puts it back).
+   dms-greeter carries its UI in the binary; greetd then runs `~/.local/share/dms-greeter-live/dms-greeter-live`
+   instead (the command in `/etc/greetd/config.toml`; the old file is kept as `config.toml.orig` there). It unpacks
+   the binary's UI once per dms-greeter build (~0.8 s), patches a copy in the greeter's cache
+   (`greeter-live-wallpaper.patch`) and runs dms-greeter with it; anything failing leaves the stock greeter. The
+   plugin (toggle **Live Scene on Login Screen**) writes what to run per screen to
+   `~/.local/state/DankMaterialShell/greeter-wallpaper.json`: the engine command with the wallpaper's folder and the
+   assets by path, the clock the scene keeps and the blur — the lock screen's. The greeter starts that engine on the
+   background layer (it runs as the greeter user, so the install gives the greeter group a traverse-only ACL on
+   `~/.local/share/Steam`) and fades its screenshot out once the scene has shown its first frame (~1 s; nothing
+   within 20 s: the screenshot stays). niri blurs the scene under the see-through greeter (ext-background-effect).
+   Spans keep the screenshot.
 
 After that wallpapers are switched from the DMS dashboard (click the bar clock → Wallpapers).
 
@@ -261,6 +277,8 @@ no longer applies, `prepare()` stops with the failing hunk.
   show through. Videos play on the lock screen directly; scenes are rendered by a second engine and streamed
   (0006), so a scene shows its static screenshot while it loads (~1 s for the 4K clock scene with 0007, plus about
   1 s until the player gets a keyframe) and the stream runs ~1 s behind. Span groups keep the screenshot.
+- `dms greeter sync`/`enable` may rewrite `/etc/greetd/config.toml` and drop the login screen wrapper: rerun
+  `bash dms-greeter/install.sh` afterwards.
 
 ## Licenses
 

@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+# The login screen with the live Wallpaper Engine scene. greetd runs this in place of dms-greeter
+# (/etc/greetd/config.toml, as the greeter user, with dms-greeter's own arguments).
+#
+# dms-greeter carries its UI inside the binary and unpacks it under $XDG_RUNTIME_DIR; another UI is run with
+# --shell-dir. This unpacks the binary's own UI, applies greeter-live-wallpaper.patch to a copy in the greeter's
+# cache and runs dms-greeter with it. The linuxWallpaperEngine plugin writes what to run on each screen
+# (~/.local/state/DankMaterialShell/greeter-wallpaper.json of the user this is installed for), linked into the
+# greeter's cache as wallpaper.json. When anything fails dms-greeter runs its stock UI.
+set -u
+here=$(cd "$(dirname "$0")" && pwd)
+patchfile=$here/greeter-live-wallpaper.patch
+# installed as ~/.local/share/dms-greeter-live
+home=$(cd "$here/../../.." && pwd)
+wallpaper=$home/.local/state/DankMaterialShell/greeter-wallpaper.json
+greeter=$(command -v dms-greeter || echo /usr/bin/dms-greeter)
+
+log() { echo "dms-greeter-live: $*" >&2; }
+stock() {
+    [ -n "${DMS_GREETER_LIVE_CHECK:-}" ] && exit 1
+    exec "$greeter" "$@"
+}
+
+cache_dir=/var/cache/dms-greeter
+args=("$@")
+for ((i = 0; i < ${#args[@]}; i++)); do
+    case "${args[i]}" in
+        --cache-dir) cache_dir=${args[i + 1]:-$cache_dir} ;;
+        --cache-dir=*) cache_dir=${args[i]#--cache-dir=} ;;
+    esac
+done
+base=$cache_dir/.cache/dms-greeter-live
+
+mkdir -p "$base" 2>/dev/null || { log "can't write to $base"; stock "$@"; }
+ln -sfn "$wallpaper" "$base/wallpaper.json"
+
+# one copy per dms-greeter build and patch version; the binary's UI is only unpacked when either changed
+key=$(stat -Lc '%Y-%s' "$greeter")-$(sha256sum < "$patchfile" | cut -c1-12)
+target=$base/$key
+if [ ! -f "$target/shell.qml" ]; then
+    # a UI run without a display unpacks the embedded UI into its runtime dir and fails at once
+    probe=$(mktemp -d "$base/probe.XXXXXX") || stock "$@"
+    env -i PATH=/usr/local/bin:/usr/bin:/bin HOME="$probe" XDG_CACHE_HOME="$probe" XDG_RUNTIME_DIR="$probe" \
+        timeout 20 "$greeter" run >/dev/null 2>&1
+    ui=
+    for d in "$probe"/dms-greeter-shell/*/; do
+        [ -f "$d/shell.qml" ] && ui=${d%/}
+    done
+    build=$base/.build
+    chmod -R u+w "$build" 2>/dev/null
+    rm -rf "$build"
+    if [ -z "$ui" ] || ! cp -a "$ui" "$build" || ! chmod -R u+w "$build" \
+        || ! patch -d "$build" -p1 -s --no-backup-if-mismatch < "$patchfile" >/dev/null; then
+        log "couldn't unpack or patch the dms-greeter UI, the login screen is stock"
+        chmod -R u+w "$probe" "$build" 2>/dev/null
+        rm -rf "$probe" "$build"
+        stock "$@"
+    fi
+    chmod -R u+w "$probe"
+    rm -rf "$probe"
+    mv "$build" "$target"
+fi
+
+# copies of older builds
+for d in "$base"/*/; do
+    d=${d%/}
+    [ "$d" = "$target" ] && continue
+    chmod -R u+w "$d" 2>/dev/null
+    rm -rf "$d"
+done
+
+# install.sh checks that the patch fits: it builds the copy in a scratch cache dir and stops here
+if [ -n "${DMS_GREETER_LIVE_CHECK:-}" ]; then
+    echo "$target"
+    exit 0
+fi
+
+exec env DMS_GREETER_SHELL_DIR="$target" "$greeter" --shell-dir "$target" "$@"
