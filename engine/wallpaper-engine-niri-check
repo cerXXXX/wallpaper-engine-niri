@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# pacman hook (wallpaper-engine-niri.hook): the engine and niri-lock-wallpaper are built here, not taken from a
+# repo, so `pacman -Syu` neither updates nor rebuilds them. After every transaction this says when one of them
+# lost a library it links to (an soname bump: it won't start until rebuilt) and when Arch's niri is newer than
+# the patched one.
+export LC_ALL=C
+
+warn() { echo "warning: $*"; }
+# libraries ldd can't find, space separated
+missing() { LD_LIBRARY_PATH=$2 ldd "$1" 2>/dev/null | awk '/not found/ {print $1}' | sort -u | xargs; }
+
+engine=/opt/linux-wallpaperengine/linux-wallpaperengine
+if [ -x "$engine" ]; then
+    libs=$(missing "$engine" /opt/linux-wallpaperengine/lib)
+    if [ -n "$libs" ]; then
+        warn "linux-wallpaperengine can't find $libs and won't start:"
+        warn "  rebuild it with ./install.sh --rebuild-engine in wallpaper-engine-niri"
+    fi
+fi
+
+if installed=$(pacman -Q niri-lock-wallpaper 2>/dev/null); then
+    libs=$(missing /usr/bin/niri)
+    if [ -n "$libs" ]; then
+        warn "niri can't find $libs and won't start, so neither will the session:"
+        warn "  rebuild it with ./install.sh --rebuild-niri in wallpaper-engine-niri,"
+        warn "  or from a tty go back to the stock one with pacman -S niri"
+    fi
+
+    ours=${installed#* }
+    arch=$(pacman -Si niri 2>/dev/null | awk '/^Version/ {print $3; exit}')
+    if [ -n "$arch" ] && [ "$(vercmp "${arch%-*}" "${ours%-*}")" -gt 0 ]; then
+        warn "Arch has niri $arch, niri-lock-wallpaper is $ours: bump pkgver in niri/PKGBUILD"
+        warn "  of wallpaper-engine-niri and run ./install.sh (or stay on $ours, it keeps working)"
+    fi
+fi
+exit 0
