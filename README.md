@@ -26,9 +26,10 @@ cd wallpaper-engine-niri
 
 Updating later: `git pull && ./install.sh`. The script, run as your user (it asks for sudo itself):
 
-- builds and installs the patched engine with `makepkg -si` on all cores, unless that version is already installed
-  (the previous build in `engine/src` is reused, so a new engine commit only compiles what it changed; `rm -rf engine/src`
-  for a clean build);
+- builds and installs the patched engine (`linux-wallpaperengine-niri`) with `makepkg -si` on all cores, unless that
+  version is already installed (the previous build in `engine/src` is reused, so a new engine commit only compiles what
+  it changed; `rm -rf engine/src` for a clean build). It replaces `linux-wallpaperengine-git` (its old name, or the AUR's
+  stock engine): pacman asks;
 - clones both DMS plugins into `~/.config/DankMaterialShell/plugins`, or updates existing checkouts with
   `git pull --ff-only` (a checkout of the upstream plugin is switched to the fork first; one on another branch or
   with local changes is left alone with a warning);
@@ -41,8 +42,16 @@ Updating later: `git pull && ./install.sh`. The script, run as your user (it ask
 - warns if the niri layer rule is missing from `~/.config/niri/config.kdl` (it doesn't edit your config);
 - restarts DMS and enables newly cloned plugins.
 
-Options: `--no-engine`, `--rebuild-engine`, `--no-niri`, `--no-lock-screen`, `--no-greeter`, `--no-restart`. Wallpaper Engine itself (step 1
+Options: `--no-engine`, `--rebuild-engine`, `--no-niri`, `--rebuild-niri`, `--no-lock-screen`, `--no-greeter`, `--no-restart`. Wallpaper Engine itself (step 1
 below) and the plugin settings (step 5) are still up to you.
+
+### After system updates
+
+The engine and niri are built here, so `pacman -Syu` neither updates nor rebuilds them. The engine package carries a
+pacman hook that checks both after every transaction and prints a warning when one of them lost a library it links to
+(an soname bump in ffmpeg, mpv, libinput, libdisplay-info…: it won't start until `./install.sh --rebuild-engine` or
+`--rebuild-niri`) and when Arch's niri is newer than `niri/PKGBUILD`. If niri itself doesn't start, log in on a tty
+(Ctrl+Alt+F2) and `sudo pacman -S niri` brings the stock one back.
 
 ## Install by hand
 

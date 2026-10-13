@@ -4,7 +4,8 @@
 # Safe to rerun after `git pull`: an engine that's already at this version isn't rebuilt, the plugins are
 # updated with `git pull --ff-only`, the lock screen patch replaces an older version of itself.
 #
-# usage: ./install.sh [--no-engine] [--rebuild-engine] [--no-niri] [--no-lock-screen] [--no-greeter] [--no-restart]
+# usage: ./install.sh [--no-engine] [--rebuild-engine] [--no-niri] [--rebuild-niri] [--no-lock-screen] [--no-greeter]
+#                     [--no-restart]
 # Run it as your user, it asks for sudo itself where it needs it.
 set -euo pipefail
 
@@ -20,6 +21,7 @@ plugins=(
 do_engine=1
 rebuild_engine=0
 do_niri=1
+rebuild_niri=0
 niri_updated=0
 do_lock=1
 do_greeter=1
@@ -30,11 +32,12 @@ for arg in "$@"; do
         --no-engine) do_engine=0 ;;
         --rebuild-engine) rebuild_engine=1 ;;
         --no-niri) do_niri=0 ;;
+        --rebuild-niri) rebuild_niri=1 ;;
         --no-lock-screen) do_lock=0 ;;
         --no-greeter) do_greeter=0 ;;
         --no-restart) do_restart=0 ;;
         -h | --help)
-            sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'
+            sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
         *)
@@ -56,17 +59,22 @@ dms_running() { command -v dms >/dev/null && dms ipc call plugins list >/dev/nul
 
 # --- engine
 if [ "$do_engine" = 1 ]; then
-    step "Engine (linux-wallpaperengine-git)"
+    step "Engine (linux-wallpaperengine-niri)"
     wanted=$(cd "$here/engine" && bash -c 'source ./PKGBUILD && echo "$pkgver-$pkgrel"')
-    installed=$(pacman -Q linux-wallpaperengine-git 2>/dev/null | awk '{print $2}' || true)
+    installed=$(pacman -Q linux-wallpaperengine-niri 2>/dev/null | awk '{print $2}' || true)
+    # the package was called linux-wallpaperengine-git before, or that's the AUR's stock engine: pacman asks to
+    # replace it, so no --noconfirm then (its default answer is no)
+    replaced=$(pacman -Q linux-wallpaperengine-git 2>/dev/null || true)
+    confirm=(--noconfirm)
+    [ -n "$replaced" ] && confirm=()
 
     if [ "$installed" = "$wanted" ] && [ "$rebuild_engine" = 0 ]; then
         echo "already installed: $installed (--rebuild-engine builds it again)"
     else
-        echo "installed: ${installed:-none}, building $wanted"
+        echo "installed: ${installed:-${replaced:-none}}, building $wanted"
         # no -C: the previous build's objects are reused (makepkg checks out the pinned commit); all cores unless
         # MAKEFLAGS says otherwise
-        (cd "$here/engine" && MAKEFLAGS="${MAKEFLAGS:--j$(nproc)}" makepkg -si --noconfirm)
+        (cd "$here/engine" && MAKEFLAGS="${MAKEFLAGS:--j$(nproc)}" makepkg -si "${confirm[@]}")
     fi
 fi
 
@@ -76,10 +84,10 @@ if [ "$do_niri" = 1 ]; then
     step "niri with the wallpaper under the lock screen (niri-lock-wallpaper)"
     wanted=$(cd "$here/niri" && bash -c 'source ./PKGBUILD && echo "$pkgver-$pkgrel"')
     installed=$(pacman -Q niri-lock-wallpaper 2>/dev/null | awk '{print $2}' || true)
-    arch_niri=$(pacman -Si niri 2>/dev/null | awk '/^Version/ {print $3; exit}' || true)
+    arch_niri=$(LC_ALL=C pacman -Si niri 2>/dev/null | awk '/^Version/ {print $3; exit}' || true)
 
-    if [ "$installed" = "$wanted" ]; then
-        echo "already installed: $installed"
+    if [ "$installed" = "$wanted" ] && [ "$rebuild_niri" = 0 ]; then
+        echo "already installed: $installed (--rebuild-niri builds it again)"
     else
         echo "installed: ${installed:-none (stock niri: $(pacman -Q niri 2>/dev/null | awk '{print $2}'))}, building $wanted"
         (cd "$here/niri" && MAKEFLAGS="${MAKEFLAGS:--j$(nproc)}" makepkg -si)

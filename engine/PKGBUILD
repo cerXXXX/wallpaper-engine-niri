@@ -1,7 +1,9 @@
 # Based on the AUR linux-wallpaperengine-git PKGBUILD (Maintainer: Alexis Maiquez <aur@almamu.com>), built from
 # the fork with the changes as commits (https://github.com/cerXXXX/linux-wallpaperengine, upstream b016d7d + our
 # commits). Updating the engine: point _commit at the fork's new commit and set pkgver to r<count>.<short hash>.
-pkgname=linux-wallpaperengine-git
+# A name of its own: as linux-wallpaperengine-git an AUR helper took it for the AUR package and would have
+# "upgraded" it to the stock engine once the AUR's version got past ours.
+pkgname=linux-wallpaperengine-niri
 _pkgname=linux-wallpaperengine
 _commit=96676c7bf48bce9bd5818136bc9ac0c05d802702
 pkgver=r640.96676c7b
@@ -13,8 +15,14 @@ license=('GPL-3.0-only')
 depends=('lz4' 'ffmpeg' 'mpv' 'glfw' 'glew' 'freeglut' 'libpulse' 'libcups' 'at-spi2-core' 'nss' 'libxcomposite' 'libxdamage' 'nspr')
 makedepends=('git' 'cmake' 'sdl2' 'glm' 'wayland-protocols' 'xorg-xrandr')
 provides=("linux-wallpaperengine")
-source=("${_pkgname}-niri::git+https://github.com/cerXXXX/linux-wallpaperengine.git#commit=${_commit}")
-sha256sums=('SKIP')
+conflicts=("linux-wallpaperengine" "linux-wallpaperengine-git")
+# the hook warns after pacman transactions when this engine or niri-lock-wallpaper needs a rebuild
+source=("${_pkgname}-niri::git+https://github.com/cerXXXX/linux-wallpaperengine.git#commit=${_commit}"
+        "wallpaper-engine-niri.hook"
+        "wallpaper-engine-niri-check")
+sha256sums=('SKIP'
+            'db273f9ed03191d2fe0c7ef387b84551ae4e3dac883f1e3ea019abb8a21c30a5'
+            '499997139c3e923ab7e5166c57b644d2bec277f77049d38f84d43b99fb6e7031')
 
 pkgver() {
     cd "${_pkgname}-niri"
@@ -47,4 +55,6 @@ cd /opt/${_pkgname}; exec ./${_pkgname} "\$@"
 EOF
     chmod +x ${pkgdir}/usr/bin/${_pkgname}
     chmod +x ${pkgdir}/opt/${_pkgname}/linux-wallpaperengine
+    install -Dm644 "${srcdir}/wallpaper-engine-niri.hook" -t "${pkgdir}/usr/share/libalpm/hooks/"
+    install -Dm755 "${srcdir}/wallpaper-engine-niri-check" -t "${pkgdir}/usr/share/libalpm/scripts/"
 }
