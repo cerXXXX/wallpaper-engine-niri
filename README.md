@@ -11,7 +11,7 @@ My setup for animated [Wallpaper Engine](https://store.steampowered.com/app/4319
 | [dms-wallpaperengine-dashbridge](https://github.com/cerXXXX/dms-wallpaperengine-dashbridge) | DMS plugin (separate repo): the whole Workshop library in the DMS wallpaper picker, keeps the DMS wallpaper from covering the engine, video wallpapers on the lock screen |
 | [dms-wallpaperengine](https://github.com/cerXXXX/dms-wallpaperengine) | Fork of the Linux Wallpaper Engine DMS plugin (separate repo): **Downscale to Screen** toggle, separate scene/video FPS, per-scene render settings, scene properties with readable choices (language picker, color picker, options of other languages hidden), **Layers & Effects** to turn parts of a scene off, live scenes on the lock screen, **Power Modes** per power profile (eco holds the wallpaper still with live clocks), stale screenshot timer fix |
 | [`engine/`](engine) | PKGBUILD of the linux-wallpaperengine fork ([cerXXXX/linux-wallpaperengine](https://github.com/cerXXXX/linux-wallpaperengine)): zero-copy VA-API video, correct video frame pacing, video wallpapers rendered at the video's frame rate, `--downscale-to-output`, scene clocks/text and scripts that work, `--stream` (live scenes for the lock screen), hidden layers not loaded and layers/effects the user can turn off, a first-frame marker, `--eco` (held still, redrawn only when a clock changes) with a control channel and sound fades, which layers show the time or date |
-| [`dms-lock-screen/`](dms-lock-screen) | DMS patch, applied by the dms user service to a copy of its UI at every start: a video set as the lock screen wallpaper (or the desktop's Wallpaper Engine video) plays behind the clock and password field, the desktop's Wallpaper Engine scene runs live there (held still with live clocks in eco); a **Blur Wallpaper** toggle for the lock screen background; the system time and date step aside when the scene shows its own |
+| [`dms-lock-screen/`](dms-lock-screen) | DMS patch, applied by the dms user service to a copy of its UI at every start: a video set as the lock screen wallpaper (or the desktop's Wallpaper Engine video) plays behind the clock and password field, the desktop's Wallpaper Engine scene runs live there (held still with live clocks in eco); a **Blur Wallpaper** toggle for the lock screen background (live wallpapers take the plugin's own); the system time and date step aside when the scene shows its own and the plugin says so |
 | [`niri/`](niri) | niri patch + PKGBUILD (`niri-lock-wallpaper`): the running wallpaper shows under a see-through lock screen the moment the session locks |
 | [`system/`](system) | niri layer rule, `makepkg.conf` without `-debug` packages |
 
@@ -95,17 +95,22 @@ below) and the plugin settings (step 5) are still up to you.
    and only a changed frame is written (clocks, `--frame-file`), the lock screen shows it as an image
    (`dms ipc call linuxWallpaperEngine lockFrames`). The live scene fades in over the screenshot once it has
    played cleanly for 0.6 s (a stream joined live decodes into garbage until its next keyframe), and the player loads
-   without holding up the lock screen. The blur is switched in DMS
-   Settings → Lock Screen → Appearance → **Blur Wallpaper** (on by default, as in stock DMS).
-   With the patched niri (step 6) and **Blur Wallpaper** off, none of the above is needed: the lock screen leaves its
+   without holding up the lock screen. The blur of a live wallpaper is switched in the plugin's settings →
+   **Blur on Lock Screen** (`dms ipc call linuxWallpaperEngine lockBlur`; unset, it follows DMS's own toggle); DMS
+   Settings → Lock Screen → Appearance → **Blur Wallpaper** (on by default, as in stock DMS) is for static wallpapers
+   and a custom lock screen wallpaper.
+   With the patched niri (step 6) and the plugin's blur off, none of the above is needed: the lock screen leaves its
    own wallpaper out and niri shows the running engine under it, live from the first frame, with no second engine
    and no stream (`dms ipc call linuxWallpaperEngine lockUnderlay`). With the blur on it falls back to the stream,
    which the lock screen blurs itself.
-   While the live scene is up and it shows the time or the date itself, the lock screen leaves out its own (fades
-   them out, the password field stays put): Settings → Lock Screen → Layout → **Hide Time and Date the Wallpaper
-   Shows** (on by default). The plugin tells which scenes show what (`dms ipc call linuxWallpaperEngine lockClocks`,
-   detected from the layers' scripts with patch 0012, per scene in Scene Settings → *Clock on the Lock Screen*);
-   the screenshot shown until the scene is up keeps the system clock, its own clock is stale.
+   A scene's own time and date: the plugin's settings → **Wallpaper's Time on Lock Screen** and **Wallpaper's Date
+   on Lock Screen** (both on by default). On, while the live scene is up and shows it, the lock screen leaves out its
+   own (fades it out, the password field stays put). Off, the scene's clock (date) layers are hidden on the lock
+   screen — `--hide-layer` for the lock screen's engine, the control command `hide-layers` for the running engine
+   under the patched niri — and the lock screen shows its own, as for scenes without one. The plugin tells which
+   scenes show what (`dms ipc call linuxWallpaperEngine lockClocks`, the hidden layers in `lockClockLayers`),
+   detected from the layers' scripts, per scene in Scene Settings → *Clock on the Lock Screen*; the screenshot shown
+   until the scene is up keeps the system clock, its own clock is stale.
 
 After that wallpapers are switched from the DMS dashboard (click the bar clock → Wallpapers).
 
@@ -215,6 +220,11 @@ git fetch upstream && git merge upstream/main                             # new 
   day/month/year (date). The plugin uses it to tell the lock screen to leave out its own time and date when the
   scene already shows them. On the multi-language clock scene: 90 of 271 layers, of which the visible ones are the
   clock, its AM/PM and the date.
+- **[hide-layers](https://github.com/cerXXXX/linux-wallpaperengine/commit/96676c7b) control command.** `--control`
+  takes `hide-layers 1,2,3` (stop drawing those layers and everything inside them) and a bare `hide-layers` (draw
+  them again); unlike `--hide-layer` they're still created, so they come back at once, and a held (eco) wallpaper
+  redraws right away (0.04 s). The plugin hides the scene's clock layers under the patched niri's lock screen when
+  the user wants the lock screen's own time or date.
 
 Measured on Intel Iris Xe (Tiger Lake), niri, one 1920x1080@60 output; rendered frames counted from
 `wl_surface.attach` with `WAYLAND_DEBUG=1`, CPU as a share of one core:
