@@ -1,8 +1,10 @@
 engine/src/
 engine/pkg/
 engine/linux-wallpaperengine-git/
+engine/linux-wallpaperengine-niri/
 engine/*.pkg.tar.*
 niri-dev/
+engine-dev/
 niri/src/
 niri/pkg/
 niri/*.tar.gz
