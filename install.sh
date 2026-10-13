@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Installs or updates everything: the patched engine, both DMS plugins, the lock screen patch.
+# Installs or updates everything: the patched engine, niri with the wallpaper under the lock screen, both DMS
+# plugins, the lock screen patch.
 # Safe to rerun after `git pull`: an engine that's already at this version isn't rebuilt, the plugins are
 # updated with `git pull --ff-only`, the lock screen patch replaces an older version of itself.
 #
-# usage: ./install.sh [--no-engine] [--rebuild-engine] [--no-lock-screen] [--no-restart]
+# usage: ./install.sh [--no-engine] [--rebuild-engine] [--no-niri] [--no-lock-screen] [--no-restart]
 # Run it as your user, it asks for sudo itself where it needs it.
 set -euo pipefail
 
@@ -18,6 +19,8 @@ plugins=(
 
 do_engine=1
 rebuild_engine=0
+do_niri=1
+niri_updated=0
 do_lock=1
 do_restart=1
 
@@ -25,10 +28,11 @@ for arg in "$@"; do
     case "$arg" in
         --no-engine) do_engine=0 ;;
         --rebuild-engine) rebuild_engine=1 ;;
+        --no-niri) do_niri=0 ;;
         --no-lock-screen) do_lock=0 ;;
         --no-restart) do_restart=0 ;;
         -h | --help)
-            sed -n '2,7p' "$0" | sed 's/^# \{0,1\}//'
+            sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
         *)
@@ -61,6 +65,26 @@ if [ "$do_engine" = 1 ]; then
         # no -C: the previous build's objects are reused (prepare() resets the patched sources); all cores unless
         # MAKEFLAGS says otherwise
         (cd "$here/engine" && MAKEFLAGS="${MAKEFLAGS:--j$(nproc)}" makepkg -si --noconfirm)
+    fi
+fi
+
+# --- niri: the stock one draws nothing but the lock surface while locked, the patched one (niri/) shows the running
+# wallpaper under a see-through lock screen; its own package, so pacman asks to replace niri (no --noconfirm)
+if [ "$do_niri" = 1 ]; then
+    step "niri with the wallpaper under the lock screen (niri-lock-wallpaper)"
+    wanted=$(cd "$here/niri" && bash -c 'source ./PKGBUILD && echo "$pkgver-$pkgrel"')
+    installed=$(pacman -Q niri-lock-wallpaper 2>/dev/null | awk '{print $2}' || true)
+    arch_niri=$(pacman -Si niri 2>/dev/null | awk '/^Version/ {print $3; exit}' || true)
+
+    if [ "$installed" = "$wanted" ]; then
+        echo "already installed: $installed"
+    else
+        echo "installed: ${installed:-none (stock niri: $(pacman -Q niri 2>/dev/null | awk '{print $2}'))}, building $wanted"
+        (cd "$here/niri" && MAKEFLAGS="${MAKEFLAGS:--j$(nproc)}" makepkg -si)
+        niri_updated=1
+    fi
+    if [ -n "$arch_niri" ] && [ "$(vercmp "${arch_niri%-*}" "${wanted%-*}")" -gt 0 ]; then
+        warn "Arch has niri $arch_niri, niri/PKGBUILD is still at $wanted: bump pkgver there (and check the patch still applies)"
     fi
 fi
 
@@ -144,6 +168,12 @@ if [ "$do_restart" = 1 ]; then
 else
     echo
     echo "Run 'dms restart' to load the updated plugins and lock screen."
+fi
+
+if [ "$niri_updated" = 1 ]; then
+    echo
+    echo "niri was updated: log out and back in to run it (the lock screen shows the wallpaper at once with"
+    echo "Settings → Lock Screen → Appearance → Blur Wallpaper off)."
 fi
 
 step "Done"

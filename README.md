@@ -12,6 +12,7 @@ My setup for animated [Wallpaper Engine](https://store.steampowered.com/app/4319
 | [dms-wallpaperengine](https://github.com/cerXXXX/dms-wallpaperengine) | Fork of the Linux Wallpaper Engine DMS plugin (separate repo): **Downscale to Screen** toggle, separate scene/video FPS, per-scene render settings, scene properties with readable choices (language picker, color picker, options of other languages hidden), **Layers & Effects** to turn parts of a scene off, live scenes on the lock screen, **Power Modes** per power profile (eco holds the wallpaper still with live clocks), stale screenshot timer fix |
 | [`engine/`](engine) | linux-wallpaperengine patches + PKGBUILD: zero-copy VA-API video, correct video frame pacing, video wallpapers rendered at the video's frame rate, `--downscale-to-output`, scene clocks/text and scripts that work, `--stream` (live scenes for the lock screen), hidden layers not loaded and layers/effects the user can turn off, a first-frame marker, `--eco` (held still, redrawn only when a clock changes) with a control channel and sound fades, which layers show the time or date |
 | [`dms-lock-screen/`](dms-lock-screen) | DMS patch, applied by the dms user service to a copy of its UI at every start: a video set as the lock screen wallpaper (or the desktop's Wallpaper Engine video) plays behind the clock and password field, the desktop's Wallpaper Engine scene runs live there (held still with live clocks in eco); a **Blur Wallpaper** toggle for the lock screen background; the system time and date step aside when the scene shows its own |
+| [`niri/`](niri) | niri patch + PKGBUILD (`niri-lock-wallpaper`): the running wallpaper shows under a see-through lock screen the moment the session locks |
 | [`system/`](system) | niri layer rule, `makepkg.conf` without `-debug` packages |
 
 ## Install or update everything
@@ -31,10 +32,13 @@ Updating later: `git pull && ./install.sh`. The script, run as your user (it ask
   `git pull --ff-only` (a checkout of the upstream plugin is switched to the fork first; one on another branch or
   with local changes is left alone with a warning);
 - installs or updates the lock screen patch (`bash dms-lock-screen/install.sh`, a drop-in for the dms user service);
+- builds and installs niri with the lock screen patch (`niri-lock-wallpaper`, replaces the `niri` package: pacman
+  asks), unless that version is already installed; warns when Arch's niri is newer than `niri/PKGBUILD`. The new
+  niri runs after the next login;
 - warns if the niri layer rule is missing from `~/.config/niri/config.kdl` (it doesn't edit your config);
 - restarts DMS and enables newly cloned plugins.
 
-Options: `--no-engine`, `--rebuild-engine`, `--no-lock-screen`, `--no-restart`. Wallpaper Engine itself (step 1
+Options: `--no-engine`, `--rebuild-engine`, `--no-niri`, `--no-lock-screen`, `--no-restart`. Wallpaper Engine itself (step 1
 below) and the plugin settings (step 5) are still up to you.
 
 ## Install by hand
@@ -66,6 +70,13 @@ below) and the plugin settings (step 5) are still up to you.
    wallpaper once, pick the **Power Modes** for each power profile (defaults: Full / Eco / Eco), and under Advanced Settings → Performance & Rendering enable
    **Downscale to Screen** (needs the patched engine from step 3).
 6. **niri:** add [`system/niri-layer-rule.kdl`](system/niri-layer-rule.kdl) to `~/.config/niri/config.kdl`.
+   For the wallpaper on the lock screen at once (optional): `cd niri && makepkg -si` (replaces `niri`, log in again).
+   Stock niri draws nothing but the lock surface while locked; the patched one also draws the background layer
+   (wallpapers only, no windows) under a see-through lock surface, so the running engine itself shows the moment
+   the session locks. An opaque lock surface still covers it, and without one (the locker died) niri shows its
+   solid color as before. `niri msg version` says `lock-wallpaper`, which is how the plugin tells. It also lets a
+   lock surface blur the wallpaper through `ext-background-effect`, but quickshell can't ask for that on a lock
+   surface yet.
 7. **Lock screen video and blur toggle** (optional):
    ```sh
    bash dms-lock-screen/install.sh   # uninstall: bash dms-lock-screen/install.sh uninstall
@@ -86,6 +97,10 @@ below) and the plugin settings (step 5) are still up to you.
    played cleanly for 0.6 s (a stream joined live decodes into garbage until its next keyframe), and the player loads
    without holding up the lock screen. The blur is switched in DMS
    Settings → Lock Screen → Appearance → **Blur Wallpaper** (on by default, as in stock DMS).
+   With the patched niri (step 6) and **Blur Wallpaper** off, none of the above is needed: the lock screen leaves its
+   own wallpaper out and niri shows the running engine under it, live from the first frame, with no second engine
+   and no stream (`dms ipc call linuxWallpaperEngine lockUnderlay`). With the blur on it falls back to the stream,
+   which the lock screen blurs itself.
    While the live scene is up and it shows the time or the date itself, the lock screen leaves out its own (fades
    them out, the password field stays put): Settings → Lock Screen → Layout → **Hide Time and Date the Wallpaper
    Shows** (on by default). The plugin tells which scenes show what (`dms ipc call linuxWallpaperEngine lockClocks`,
