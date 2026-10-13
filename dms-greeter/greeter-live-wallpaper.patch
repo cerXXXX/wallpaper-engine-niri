@@ -1,0 +1,140 @@
+--- a/Modules/Greetd/GreeterContent.qml
++++ b/Modules/Greetd/GreeterContent.qml
+@@ -36,6 +36,52 @@
+     property int hyprlandLayoutCount: 0
+     property bool isPrimaryScreen: !Quickshell.screens?.length || screenName === Quickshell.screens[0]?.name
+ 
++    // liveWallpaper: the linuxWallpaperEngine plugin's scene runs live under the login screen. The plugin writes what
++    // to run ({ outputs: { <screen>: { command, clock: { time, date }, blur } } }), dms-greeter-live links it into the
++    // greeter's cache. The greeter starts that engine on the background layer and, once the engine has shown its first
++    // frame, fades its own wallpaper out; the scene's time / date then stand in for the greeter's (clock), and niri
++    // blurs the scene when the plugin says so (blur).
++    readonly property var liveWallpaper: {
++        try {
++            var outputs = JSON.parse(liveWallpaperFile.text() || "{}").outputs || {};
++            var entry = outputs[screenName];
++            return entry && Array.isArray(entry.command) && entry.command.length > 0 ? entry : null;
++        } catch (e) {
++            return null;
++        }
++    }
++    property bool liveSceneShown: false
++    readonly property bool liveSceneBlurred: liveSceneShown && liveWallpaper?.blur === true
++    readonly property bool wallpaperShowsTime: liveSceneShown && liveWallpaper?.clock?.time === true
++    readonly property bool wallpaperShowsDate: liveSceneShown && liveWallpaper?.clock?.date === true
++
++    FileView {
++        id: liveWallpaperFile
++        path: GreetdSettings.configBaseDir ? GreetdSettings.configBaseDir + "/.cache/dms-greeter-live/wallpaper.json" : ""
++        blockLoading: true
++        printErrors: false
++    }
++
++    Process {
++        id: liveWallpaperEngine
++        command: root.liveWallpaper ? root.liveWallpaper.command : []
++        running: command.length > 0
++        stdout: SplitParser {
++            onRead: data => {
++                if (data.indexOf("First frame presented") !== -1)
++                    root.liveSceneShown = true;
++            }
++        }
++        onExited: root.liveSceneShown = false
++    }
++
++    // an engine that hasn't shown anything by then is stopped, the greeter keeps its own wallpaper
++    Timer {
++        interval: 20000
++        running: liveWallpaperEngine.running && !root.liveSceneShown
++        onTriggered: liveWallpaperEngine.running = false
++    }
++
+     property bool weatherInitialized: false
+     property bool awaitingExternalAuth: false
+     property bool pendingPasswordResponse: false
+@@ -737,11 +783,21 @@
+     Rectangle {
+         anchors.fill: parent
+         color: GreetdSettings.effectiveWallpaperBackgroundColor
++        // liveWallpaper: see-through over the live scene
++        opacity: root.liveSceneShown ? 0 : 1
++
++        Behavior on opacity {
++            NumberAnimation {
++                duration: Theme.mediumDuration
++                easing.type: Theme.standardEasing
++            }
++        }
+     }
+ 
+     DankBackdrop {
+         anchors.fill: parent
+         screenName: root.screenName
++        opacity: root.liveSceneShown ? 0 : 1
+         visible: {
+             var _ = SessionData.perMonitorWallpaper;
+             var __ = SessionData.monitorWallpapers;
+@@ -764,7 +820,9 @@
+         smooth: true
+         asynchronous: false
+         cache: true
+-        visible: source !== ""
++        visible: source !== "" && opacity > 0
++        // liveWallpaper: the screenshot shows until the live scene is up
++        opacity: root.liveSceneShown ? 0 : 1
+         layer.enabled: true
+ 
+         layer.effect: MultiEffect {
+@@ -818,6 +876,15 @@
+ 
+                 width: parent.width
+                 height: clockText.implicitHeight
++                // liveWallpaper: faded out but kept in the layout, so the date and the password field stay put
++                opacity: root.wallpaperShowsTime ? 0 : 1
++
++                Behavior on opacity {
++                    NumberAnimation {
++                        duration: Theme.mediumDuration
++                        easing.type: Theme.standardEasing
++                    }
++                }
+ 
+                 Row {
+                     id: clockText
+@@ -938,7 +1005,14 @@
+                 text: systemClock.date.toLocaleDateString(I18n.locale(), GreetdSettings.getEffectiveLockDateFormat())
+                 font.pixelSize: Theme.fontSizeXLarge
+                 color: "white"
+-                opacity: 0.9
++                opacity: root.wallpaperShowsDate ? 0 : 0.9
++
++                Behavior on opacity {
++                    NumberAnimation {
++                        duration: Theme.mediumDuration
++                        easing.type: Theme.standardEasing
++                    }
++                }
+             }
+ 
+             ColumnLayout {
+--- a/Modules/Greetd/GreeterSurface.qml
++++ b/Modules/Greetd/GreeterSurface.qml
+@@ -25,7 +25,17 @@
+         WlrLayershell.keyboardFocus: WlrKeyboardFocus.Exclusive
+         color: "transparent"
+ 
++        // liveWallpaper: niri blurs the live scene under the see-through login screen (ext-background-effect)
++        BackgroundEffect.blurRegion: greeterContent.liveSceneBlurred ? liveBlurRegion : null
++
++        Region {
++            id: liveBlurRegion
++            width: root.width
++            height: root.height
++        }
++
+         GreeterContent {
++            id: greeterContent
+             anchors.fill: parent
+             screenName: root.screen?.name ?? ""
+         }

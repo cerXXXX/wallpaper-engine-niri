@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Installs or updates everything: the patched engine, niri with the wallpaper under the lock screen, both DMS
-# plugins, the lock screen patch.
+# plugins, the lock screen patch, the live scene on the login screen (dms-greeter).
 # Safe to rerun after `git pull`: an engine that's already at this version isn't rebuilt, the plugins are
 # updated with `git pull --ff-only`, the lock screen patch replaces an older version of itself.
 #
-# usage: ./install.sh [--no-engine] [--rebuild-engine] [--no-niri] [--no-lock-screen] [--no-restart]
+# usage: ./install.sh [--no-engine] [--rebuild-engine] [--no-niri] [--no-lock-screen] [--no-greeter] [--no-restart]
 # Run it as your user, it asks for sudo itself where it needs it.
 set -euo pipefail
 
@@ -22,6 +22,7 @@ rebuild_engine=0
 do_niri=1
 niri_updated=0
 do_lock=1
+do_greeter=1
 do_restart=1
 
 for arg in "$@"; do
@@ -30,6 +31,7 @@ for arg in "$@"; do
         --rebuild-engine) rebuild_engine=1 ;;
         --no-niri) do_niri=0 ;;
         --no-lock-screen) do_lock=0 ;;
+        --no-greeter) do_greeter=0 ;;
         --no-restart) do_restart=0 ;;
         -h | --help)
             sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'
@@ -136,6 +138,12 @@ if [ "$do_lock" = 1 ]; then
     bash "$here/dms-lock-screen/install.sh" || warn "the lock screen patch doesn't fit this DMS version, the lock screen stays stock"
 fi
 
+# --- login screen: only where dms-greeter is the greetd greeter
+if [ "$do_greeter" = 1 ] && command -v dms-greeter >/dev/null; then
+    step "Login screen (dms-greeter)"
+    bash "$here/dms-greeter/install.sh" || warn "the login screen stays stock"
+fi
+
 # --- niri: the rule can't be merged into someone's config blindly, so only check for it
 niri_config="${XDG_CONFIG_HOME:-$HOME/.config}/niri/config.kdl"
 if [ -f "$niri_config" ] && ! grep -q 'linux-wallpaperengine' "$niri_config"; then
@@ -173,7 +181,7 @@ fi
 if [ "$niri_updated" = 1 ]; then
     echo
     echo "niri was updated: log out and back in to run it (the lock screen shows the wallpaper at once with"
-    echo "Settings → Lock Screen → Appearance → Blur Wallpaper off)."
+    echo "the plugin's Blur on Lock Screen off)."
 fi
 
 step "Done"
