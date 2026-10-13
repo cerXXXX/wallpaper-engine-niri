@@ -1,41 +1,46 @@
 --- a/Common/settings/SettingsSpec.js
 +++ b/Common/settings/SettingsSpec.js
-@@ -511,6 +511,8 @@
+@@ -511,6 +511,7 @@
      lockScreenVideoCycling: { def: false },
      lockScreenWallpaperPath: { def: "" },
      lockScreenWallpaperFillMode: { def: "" },
 +    lockScreenWallpaperBlur: { def: true },
-+    lockScreenHideWallpaperClock: { def: true },
      lockScreenFontFamily: { def: "" },
      hideBrightnessSlider: { def: false },
  
 --- a/Common/SettingsData.qml
 +++ b/Common/SettingsData.qml
-@@ -966,6 +966,8 @@
+@@ -966,6 +966,7 @@
      property bool lockScreenVideoCycling: false
      property string lockScreenWallpaperPath: ""
      property string lockScreenWallpaperFillMode: ""
 +    property bool lockScreenWallpaperBlur: true
-+    property bool lockScreenHideWallpaperClock: true
      property string lockScreenFontFamily: ""
      property bool hideBrightnessSlider: false
  
 --- a/Modules/Lock/LockScreenContent.qml
 +++ b/Modules/Lock/LockScreenContent.qml
-@@ -39,6 +39,12 @@
+@@ -39,6 +39,19 @@
      property bool lockerReadyArmed: false
      property var sessionLock: null
      readonly property bool hasCustomWallpaper: SettingsData.lockScreenWallpaperPath !== ""
 +    // lockUnderlay: the patched niri draws this screen's running wallpaper under the lock surface (the
 +    // linuxWallpaperEngine plugin says so), so the lock screen leaves its own wallpaper out and stays see-through
 +    readonly property bool wallpaperUnderlay: !hasCustomWallpaper && ((PluginService.globalVars["linuxWallpaperEngine"] || {}).lockUnderlay || {})[screenName] === true
-+    // lockScreenHideWallpaperClock: the live Wallpaper Engine scene already shows the time / the date
-+    readonly property bool wallpaperShowsTime: SettingsData.lockScreenHideWallpaperClock && wallpaperBackground.liveSceneShown && wallpaperBackground.engineClock?.time === true
-+    readonly property bool wallpaperShowsDate: SettingsData.lockScreenHideWallpaperClock && wallpaperBackground.liveSceneShown && wallpaperBackground.engineClock?.date === true
++    // lockClocks: the live Wallpaper Engine scene already shows the time / the date (and the user wants it to, the
++    // plugin's "Wallpaper's Time/Date on Lock Screen")
++    readonly property bool wallpaperShowsTime: wallpaperBackground.liveSceneShown && wallpaperBackground.engineClock?.time === true
++    readonly property bool wallpaperShowsDate: wallpaperBackground.liveSceneShown && wallpaperBackground.engineClock?.date === true
++    // lockBlur: the plugin's own "Blur on Lock Screen" for the screens with a live wallpaper; lockScreenWallpaperBlur
++    // for the others and for a custom lock screen wallpaper
++    readonly property bool wallpaperBlur: {
++        var blur = ((PluginService.globalVars["linuxWallpaperEngine"] || {}).lockBlur || {})[screenName];
++        return hasCustomWallpaper || blur === undefined ? SettingsData.lockScreenWallpaperBlur : blur === true;
++    }
      readonly property string lockFontFamily: SettingsData.lockScreenFontFamily
  
      component ClockDigitText: StyledText {
-@@ -234,13 +240,13 @@
+@@ -234,13 +247,13 @@
  
      Rectangle {
          anchors.fill: parent
@@ -51,7 +56,7 @@
                  return false;
              var currentWallpaper = SessionData.getMonitorWallpaper(screenName);
              return !currentWallpaper || (currentWallpaper && currentWallpaper.startsWith("#"));
-@@ -256,9 +262,45 @@
+@@ -256,9 +269,44 @@
          id: wallpaperBackground
          anchors.fill: parent
  
@@ -79,8 +84,7 @@
 +            var vars = PluginService.globalVars["linuxWallpaperEngine"] || {};
 +            return (vars.lockFrames || {})[root.screenName] || "";
 +        }
-+        // lockScreenHideWallpaperClock: what the scene on this screen shows of the time, { time, date } (the plugin
-+        // publishes them as lockClocks)
++        // lockClocks: what the scene on this screen shows of the time, { time, date } (the plugin publishes them)
 +        readonly property var engineClock: {
 +            if (root.hasCustomWallpaper || engineVideo !== "")
 +                return null;
@@ -97,7 +101,7 @@
              var w = SessionData.getMonitorWallpaper(screenName);
              return (w && !w.startsWith("#")) ? encodeFileUrl(w) : "";
          }
-@@ -270,13 +312,16 @@
+@@ -270,13 +318,16 @@
  
          readonly property real screenScale: CompositorService.getScreenScale(Quickshell.screens.find(s => s.name === root.screenName) ?? null)
          readonly property size decodeSize: Qt.size(Math.round(width * screenScale), Math.round(height * screenScale))
@@ -112,12 +116,12 @@
 +        sourceComponent: isVideo ? videoWallpaperComp : engineStream !== "" ? streamWallpaperComp : engineFrame !== "" ? frameWallpaperComp : fillModeName === "Scrolling" ? scrollWallpaperComp : plainWallpaperComp
  
 -        layer.enabled: true
-+        // lockScreenWallpaperBlur: off draws the wallpaper sharp, without the offscreen blur layer
-+        layer.enabled: SettingsData.lockScreenWallpaperBlur
++        // lockScreenWallpaperBlur / lockBlur: off draws the wallpaper sharp, without the offscreen blur layer
++        layer.enabled: root.wallpaperBlur
          layer.effect: MultiEffect {
              autoPaddingEnabled: false
              blurEnabled: true
-@@ -293,6 +338,150 @@
+@@ -293,6 +344,150 @@
          }
      }
  
@@ -268,11 +272,11 @@
      Component {
          id: plainWallpaperComp
          Image {
-@@ -373,6 +562,15 @@
+@@ -373,6 +568,15 @@
              width: parent.width
              height: verticalClock.visible ? verticalClock.implicitHeight : clockText.implicitHeight
              visible: SettingsData.lockScreenShowTime
-+            // lockScreenHideWallpaperClock: faded out but kept in the layout, so the date and the password field stay put
++            // lockClocks: faded out but kept in the layout, so the date and the password field stay put
 +            opacity: root.wallpaperShowsTime ? 0 : 1
 +
 +            Behavior on opacity {
@@ -284,7 +288,7 @@
  
              Row {
                  id: clockText
-@@ -511,7 +709,14 @@
+@@ -511,7 +715,14 @@
              font.pixelSize: Theme.fontSizeXLarge
              font.family: root.lockFontFamily !== "" ? root.lockFontFamily : resolvedFontFamily
              color: "white"
@@ -302,26 +306,7 @@
          Item {
 --- a/Modules/Settings/LockScreenTab.qml
 +++ b/Modules/Settings/LockScreenTab.qml
-@@ -316,6 +316,18 @@
-                     onToggled: checked => SettingsData.set("lockScreenShowDate", checked)
-                 }
- 
-+                // lockScreenHideWallpaperClock: the linuxWallpaperEngine plugin publishes which screens' scenes show
-+                // the time or the date (lockClocks)
-+                SettingsToggleRow {
-+                    settingKey: "lockScreenHideWallpaperClock"
-+                    tags: ["lock", "screen", "time", "date", "clock", "wallpaper", "engine", "scene", "hide"]
-+                    text: I18n.tr("Hide Time and Date the Wallpaper Shows")
-+                    description: I18n.tr("Leave out the system time or date while a live Wallpaper Engine scene that already shows it is on the lock screen")
-+                    visible: SettingsData.lockScreenShowTime || SettingsData.lockScreenShowDate
-+                    checked: SettingsData.lockScreenHideWallpaperClock
-+                    onToggled: checked => SettingsData.set("lockScreenHideWallpaperClock", checked)
-+                }
-+
-                 SettingsToggleRow {
-                     settingKey: "lockScreenShowProfileImage"
-                     tags: ["lock", "screen", "profile", "image", "avatar", "picture"]
-@@ -414,6 +426,15 @@
+@@ -414,6 +414,15 @@
                      onPathSelected: path => SettingsData.set("lockScreenWallpaperPath", path)
                      onFillModeSelected: mode => SettingsData.set("lockScreenWallpaperFillMode", mode)
                  }
@@ -330,7 +315,7 @@
 +                    settingKey: "lockScreenWallpaperBlur"
 +                    tags: ["lock", "screen", "wallpaper", "background", "blur"]
 +                    text: I18n.tr("Blur Wallpaper")
-+                    description: I18n.tr("Blur the lock screen background behind the clock and password field. Off, a patched niri (lock-wallpaper) shows the running wallpaper itself the moment the screen locks")
++                    description: I18n.tr("Blur the lock screen background behind the clock and password field. Live Wallpaper Engine wallpapers have their own setting in the plugin's settings")
 +                    checked: SettingsData.lockScreenWallpaperBlur
 +                    onToggled: checked => SettingsData.set("lockScreenWallpaperBlur", checked)
 +                }
