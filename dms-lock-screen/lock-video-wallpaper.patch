@@ -1,26 +1,38 @@
 --- a/Common/settings/SettingsSpec.js
 +++ b/Common/settings/SettingsSpec.js
-@@ -511,6 +511,7 @@
+@@ -511,6 +511,8 @@
      lockScreenVideoCycling: { def: false },
      lockScreenWallpaperPath: { def: "" },
      lockScreenWallpaperFillMode: { def: "" },
 +    lockScreenWallpaperBlur: { def: true },
++    lockScreenHideWallpaperClock: { def: true },
      lockScreenFontFamily: { def: "" },
      hideBrightnessSlider: { def: false },
  
 --- a/Common/SettingsData.qml
 +++ b/Common/SettingsData.qml
-@@ -966,6 +966,7 @@
+@@ -966,6 +966,8 @@
      property bool lockScreenVideoCycling: false
      property string lockScreenWallpaperPath: ""
      property string lockScreenWallpaperFillMode: ""
 +    property bool lockScreenWallpaperBlur: true
++    property bool lockScreenHideWallpaperClock: true
      property string lockScreenFontFamily: ""
      property bool hideBrightnessSlider: false
  
 --- a/Modules/Lock/LockScreenContent.qml
 +++ b/Modules/Lock/LockScreenContent.qml
-@@ -256,9 +256,35 @@
+@@ -39,6 +39,9 @@
+     property bool lockerReadyArmed: false
+     property var sessionLock: null
+     readonly property bool hasCustomWallpaper: SettingsData.lockScreenWallpaperPath !== ""
++    // lockScreenHideWallpaperClock: the live Wallpaper Engine scene already shows the time / the date
++    readonly property bool wallpaperShowsTime: SettingsData.lockScreenHideWallpaperClock && wallpaperBackground.liveSceneShown && wallpaperBackground.engineClock?.time === true
++    readonly property bool wallpaperShowsDate: SettingsData.lockScreenHideWallpaperClock && wallpaperBackground.liveSceneShown && wallpaperBackground.engineClock?.date === true
+     readonly property string lockFontFamily: SettingsData.lockScreenFontFamily
+ 
+     component ClockDigitText: StyledText {
+@@ -256,9 +259,45 @@
          id: wallpaperBackground
          anchors.fill: parent
  
@@ -48,6 +60,16 @@
 +            var vars = PluginService.globalVars["linuxWallpaperEngine"] || {};
 +            return (vars.lockFrames || {})[root.screenName] || "";
 +        }
++        // lockScreenHideWallpaperClock: what the scene on this screen shows of the time, { time, date } (the plugin
++        // publishes them as lockClocks)
++        readonly property var engineClock: {
++            if (root.hasCustomWallpaper || engineVideo !== "")
++                return null;
++            var vars = PluginService.globalVars["linuxWallpaperEngine"] || {};
++            return (vars.lockClocks || {})[root.screenName] || null;
++        }
++        // the live scene (stream or eco frame) is up; the screenshot under it shows the time it was taken
++        readonly property bool liveSceneShown: item !== null && item.liveSceneShown === true
          readonly property string wallpaperSource: {
              if (root.hasCustomWallpaper)
                  return root.encodeFileUrl(SettingsData.lockScreenWallpaperPath);
@@ -56,7 +78,7 @@
              var w = SessionData.getMonitorWallpaper(screenName);
              return (w && !w.startsWith("#")) ? encodeFileUrl(w) : "";
          }
-@@ -270,13 +296,16 @@
+@@ -270,13 +309,16 @@
  
          readonly property real screenScale: CompositorService.getScreenScale(Quickshell.screens.find(s => s.name === root.screenName) ?? null)
          readonly property size decodeSize: Qt.size(Math.round(width * screenScale), Math.round(height * screenScale))
@@ -75,11 +97,10 @@
          layer.effect: MultiEffect {
              autoPaddingEnabled: false
              blurEnabled: true
-@@ -292,6 +321,145 @@
-             }
+@@ -293,6 +335,150 @@
          }
      }
-+
+ 
 +    // Loaded by path like VideoScreensaver does, so a missing QtMultimedia leaves
 +    // the plain background instead of breaking the lock screen.
 +    Component {
@@ -110,6 +131,8 @@
 +    Component {
 +        id: streamWallpaperComp
 +        Item {
++            readonly property bool liveSceneShown: streamLoader.playing && streamLoader.settled
++
 +            Loader {
 +                anchors.fill: parent
 +                sourceComponent: wallpaperBackground.fillModeName === "Scrolling" ? scrollWallpaperComp : plainWallpaperComp
@@ -195,12 +218,15 @@
 +    Component {
 +        id: frameWallpaperComp
 +        Item {
++            readonly property bool liveSceneShown: frameImage.status === Image.Ready
++
 +            Loader {
 +                anchors.fill: parent
 +                sourceComponent: wallpaperBackground.fillModeName === "Scrolling" ? scrollWallpaperComp : plainWallpaperComp
 +            }
 +
 +            Image {
++                id: frameImage
 +                anchors.fill: parent
 +                source: wallpaperBackground.engineFrame
 +                fillMode: Image.PreserveAspectCrop
@@ -218,12 +244,64 @@
 +            }
 +        }
 +    }
- 
++
      Component {
          id: plainWallpaperComp
+         Image {
+@@ -373,6 +559,15 @@
+             width: parent.width
+             height: verticalClock.visible ? verticalClock.implicitHeight : clockText.implicitHeight
+             visible: SettingsData.lockScreenShowTime
++            // lockScreenHideWallpaperClock: faded out but kept in the layout, so the date and the password field stay put
++            opacity: root.wallpaperShowsTime ? 0 : 1
++
++            Behavior on opacity {
++                NumberAnimation {
++                    duration: Theme.mediumDuration
++                    easing.type: Theme.standardEasing
++                }
++            }
+ 
+             Row {
+                 id: clockText
+@@ -511,7 +706,14 @@
+             font.pixelSize: Theme.fontSizeXLarge
+             font.family: root.lockFontFamily !== "" ? root.lockFontFamily : resolvedFontFamily
+             color: "white"
+-            opacity: 0.9
++            opacity: root.wallpaperShowsDate ? 0 : 0.9
++
++            Behavior on opacity {
++                NumberAnimation {
++                    duration: Theme.mediumDuration
++                    easing.type: Theme.standardEasing
++                }
++            }
+         }
+ 
+         Item {
 --- a/Modules/Settings/LockScreenTab.qml
 +++ b/Modules/Settings/LockScreenTab.qml
-@@ -414,6 +414,15 @@
+@@ -316,6 +316,18 @@
+                     onToggled: checked => SettingsData.set("lockScreenShowDate", checked)
+                 }
+ 
++                // lockScreenHideWallpaperClock: the linuxWallpaperEngine plugin publishes which screens' scenes show
++                // the time or the date (lockClocks)
++                SettingsToggleRow {
++                    settingKey: "lockScreenHideWallpaperClock"
++                    tags: ["lock", "screen", "time", "date", "clock", "wallpaper", "engine", "scene", "hide"]
++                    text: I18n.tr("Hide Time and Date the Wallpaper Shows")
++                    description: I18n.tr("Leave out the system time or date while a live Wallpaper Engine scene that already shows it is on the lock screen")
++                    visible: SettingsData.lockScreenShowTime || SettingsData.lockScreenShowDate
++                    checked: SettingsData.lockScreenHideWallpaperClock
++                    onToggled: checked => SettingsData.set("lockScreenHideWallpaperClock", checked)
++                }
++
+                 SettingsToggleRow {
+                     settingKey: "lockScreenShowProfileImage"
+                     tags: ["lock", "screen", "profile", "image", "avatar", "picture"]
+@@ -414,6 +426,15 @@
                      onPathSelected: path => SettingsData.set("lockScreenWallpaperPath", path)
                      onFillModeSelected: mode => SettingsData.set("lockScreenWallpaperFillMode", mode)
                  }

@@ -1,0 +1,125 @@
+From 8b291f1e87d08d16084377262e187624491de71b Mon Sep 17 00:00:00 2001
+From: cerXXXX <polyakovia2009@gmail.com>
+Date: Tue, 13 Oct 2026 23:09:38 +0300
+Subject: [PATCH] feat: --list-layers tells which layers show the time or the
+ date
+
+Each layer gets "clock": {"time", "date"}: its property scripts read the clock (new Date,
+Date.now, engine.timeOfDay) and ask for hours/minutes/seconds (time) or day/month/year (date).
+The lock screen leaves out its own time and date when the wallpaper already shows them.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../Application/WallpaperApplication.cpp      | 75 +++++++++++++++++++
+ 1 file changed, 75 insertions(+)
+
+diff --git a/src/WallpaperEngine/Application/WallpaperApplication.cpp b/src/WallpaperEngine/Application/WallpaperApplication.cpp
+index b69ca9a8..757ac498 100644
+--- a/src/WallpaperEngine/Application/WallpaperApplication.cpp
++++ b/src/WallpaperEngine/Application/WallpaperApplication.cpp
+@@ -30,6 +30,7 @@
+ #include <sys/timerfd.h>
+ #include <numeric>
+ #include <ranges>
++#include <regex>
+ #include <unistd.h>
+ #define STB_IMAGE_WRITE_IMPLEMENTATION
+ #include <stb_image_write.h>
+@@ -555,6 +556,77 @@ void WallpaperApplication::setupProperties () {
+     }
+ }
+ 
++namespace {
++/**
++ * What a layer's scripts show of the current time: a script that reads the clock (new Date, Date.now,
++ * engine.timeOfDay) and asks it for hours/minutes/seconds shows the time, for day/month/year the date; one
++ * that formats the whole thing (toString, toLocaleString) shows both. Lets the lock screen leave out its own
++ * time and date when the wallpaper already has them.
++ */
++struct ClockUse {
++    bool time = false;
++    bool date = false;
++};
++
++void addClockUse (ClockUse& use, const WallpaperEngine::Data::Model::UserSettingUniquePtr& setting) {
++    static const std::regex readsClock (R"(\bnew\s+Date\b|\bDate\s*\.\s*now\b|\btimeOfDay\b)");
++    static const std::regex timeParts (
++	R"(\.\s*(getHours|getMinutes|getSeconds|getUTCHours|getUTCMinutes|toLocaleTimeString|toTimeString)\b|\btimeOfDay\b)"
++    );
++    static const std::regex dateParts (
++	R"(\.\s*(getDate|getDay|getMonth|getFullYear|getYear|getUTCDate|getUTCDay|getUTCMonth|getUTCFullYear|toLocaleDateString|toDateString)\b)"
++    );
++    static const std::regex wholeDate (R"(\.\s*(toLocaleString|toUTCString|toISOString|toString)\s*\(\s*\))");
++
++    if (setting == nullptr || setting->value == nullptr) {
++	return;
++    }
++
++    const auto& source = setting->value->getScriptSource ();
++
++    if (!source.has_value () || !std::regex_search (*source, readsClock)) {
++	return;
++    }
++
++    const bool time = std::regex_search (*source, timeParts);
++    const bool date = std::regex_search (*source, dateParts);
++
++    use.time |= time;
++    use.date |= date;
++
++    // a Date turned into text as a whole
++    if (!time && !date && std::regex_search (*source, wholeDate)) {
++	use.time = use.date = true;
++    }
++}
++
++ClockUse clockUse (const WallpaperEngine::Data::Model::Object& object) {
++    using namespace WallpaperEngine::Data::Model;
++    ClockUse use;
++
++    for (const auto* setting : { &object.origin, &object.groupScale, &object.groupAngles, &object.groupVisible }) {
++	addClockUse (use, *setting);
++    }
++
++    if (object.is<Image> ()) {
++	const auto& image = *object.as<Image> ();
++
++	for (const auto* setting : { &image.scale, &image.angles, &image.visible, &image.alpha, &image.color }) {
++	    addClockUse (use, *setting);
++	}
++    } else if (object.is<Text> ()) {
++	const auto& text = *object.as<Text> ();
++
++	for (const auto* setting :
++	     { &text.text, &text.pointSize, &text.scale, &text.color, &text.alpha, &text.visible }) {
++	    addClockUse (use, *setting);
++	}
++    }
++
++    return use;
++}
++} // namespace
++
+ void WallpaperApplication::listLayers () const {
+     using Json = Data::JSON::JSON;
+ 
+@@ -591,6 +663,8 @@ void WallpaperApplication::listLayers () const {
+ 		type = "sound";
+ 	    }
+ 
++	    const auto clock = clockUse (*object);
++
+ 	    layers.push_back ({
+ 		{ "id", object->id },
+ 		{ "name", object->name },
+@@ -598,6 +672,7 @@ void WallpaperApplication::listLayers () const {
+ 		{ "parent", object->parent.has_value () ? Json (object->parent.value ()) : Json (nullptr) },
+ 		{ "hidden", visibility.hidden.contains (object->id) },
+ 		{ "effects", effects },
++		{ "clock", { { "time", clock.time }, { "date", clock.date } } },
+ 	    });
+ 	}
+ 
+-- 
+2.56.0
+
