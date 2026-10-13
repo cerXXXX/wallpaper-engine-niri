@@ -10,8 +10,8 @@ My setup for animated [Wallpaper Engine](https://store.steampowered.com/app/4319
 |---|---|
 | [dms-wallpaperengine-dashbridge](https://github.com/cerXXXX/dms-wallpaperengine-dashbridge) | DMS plugin (separate repo): the whole Workshop library in the DMS wallpaper picker, keeps the DMS wallpaper from covering the engine, video wallpapers on the lock screen |
 | [dms-wallpaperengine](https://github.com/cerXXXX/dms-wallpaperengine) | Fork of the Linux Wallpaper Engine DMS plugin (separate repo): **Downscale to Screen** toggle, separate scene/video FPS, per-scene render settings, scene properties with readable choices (language picker, color picker, options of other languages hidden), **Layers & Effects** to turn parts of a scene off, live scenes on the lock screen, **Power Modes** per power profile (eco holds the wallpaper still with live clocks), stale screenshot timer fix |
-| [`engine/`](engine) | linux-wallpaperengine patches + PKGBUILD: zero-copy VA-API video, correct video frame pacing, video wallpapers rendered at the video's frame rate, `--downscale-to-output`, scene clocks/text and scripts that work, `--stream` (live scenes for the lock screen), hidden layers not loaded and layers/effects the user can turn off, a first-frame marker, `--eco` (held still, redrawn only when a clock changes) with a control channel and sound fades |
-| [`dms-lock-screen/`](dms-lock-screen) | DMS patch, applied by the dms user service to a copy of its UI at every start: a video set as the lock screen wallpaper (or the desktop's Wallpaper Engine video) plays behind the clock and password field, the desktop's Wallpaper Engine scene runs live there (held still with live clocks in eco); a **Blur Wallpaper** toggle for the lock screen background |
+| [`engine/`](engine) | linux-wallpaperengine patches + PKGBUILD: zero-copy VA-API video, correct video frame pacing, video wallpapers rendered at the video's frame rate, `--downscale-to-output`, scene clocks/text and scripts that work, `--stream` (live scenes for the lock screen), hidden layers not loaded and layers/effects the user can turn off, a first-frame marker, `--eco` (held still, redrawn only when a clock changes) with a control channel and sound fades, which layers show the time or date |
+| [`dms-lock-screen/`](dms-lock-screen) | DMS patch, applied by the dms user service to a copy of its UI at every start: a video set as the lock screen wallpaper (or the desktop's Wallpaper Engine video) plays behind the clock and password field, the desktop's Wallpaper Engine scene runs live there (held still with live clocks in eco); a **Blur Wallpaper** toggle for the lock screen background; the system time and date step aside when the scene shows its own |
 | [`system/`](system) | niri layer rule, `makepkg.conf` without `-debug` packages |
 
 ## Install or update everything
@@ -86,6 +86,11 @@ below) and the plugin settings (step 5) are still up to you.
    played cleanly for 0.6 s (a stream joined live decodes into garbage until its next keyframe), and the player loads
    without holding up the lock screen. The blur is switched in DMS
    Settings → Lock Screen → Appearance → **Blur Wallpaper** (on by default, as in stock DMS).
+   While the live scene is up and it shows the time or the date itself, the lock screen leaves out its own (fades
+   them out, the password field stays put): Settings → Lock Screen → Layout → **Hide Time and Date the Wallpaper
+   Shows** (on by default). The plugin tells which scenes show what (`dms ipc call linuxWallpaperEngine lockClocks`,
+   detected from the layers' scripts with patch 0012, per scene in Scene Settings → *Clock on the Lock Screen*);
+   the screenshot shown until the scene is up keeps the system clock, its own clock is stale.
 
 After that wallpapers are switched from the DMS dashboard (click the bar clock → Wallpapers).
 
@@ -181,6 +186,11 @@ All seven apply on upstream `b016d7d` (pinned in the PKGBUILD).
 - **0011 stream keyframes.** `--stream` sends a keyframe every third of a second instead of every second. A player
   joining the live stream (the lock screen) decodes garbage until the next keyframe, and over UDP the first GOP is
   always broken; it now lasts ~0.3 s, so the lock screen shows the live scene ~1.4 s sooner.
+- **0012 clocks in `--list-layers`.** Each layer gets `"clock": {"time", "date"}`: one of its property scripts reads
+  the clock (`new Date`, `Date.now`, `engine.timeOfDay`) and asks for hours/minutes/seconds (time) or
+  day/month/year (date). The plugin uses it to tell the lock screen to leave out its own time and date when the
+  scene already shows them. On the multi-language clock scene: 90 of 271 layers, of which the visible ones are the
+  clock, its AM/PM and the date.
 
 Measured on Intel Iris Xe (Tiger Lake), niri, one 1920x1080@60 output; rendered frames counted from
 `wl_surface.attach` with `WAYLAND_DEBUG=1`, CPU as a share of one core:
