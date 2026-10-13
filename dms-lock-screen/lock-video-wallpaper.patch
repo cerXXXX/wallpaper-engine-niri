@@ -22,17 +22,36 @@
  
 --- a/Modules/Lock/LockScreenContent.qml
 +++ b/Modules/Lock/LockScreenContent.qml
-@@ -39,6 +39,9 @@
+@@ -39,6 +39,12 @@
      property bool lockerReadyArmed: false
      property var sessionLock: null
      readonly property bool hasCustomWallpaper: SettingsData.lockScreenWallpaperPath !== ""
++    // lockUnderlay: the patched niri draws this screen's running wallpaper under the lock surface (the
++    // linuxWallpaperEngine plugin says so), so the lock screen leaves its own wallpaper out and stays see-through
++    readonly property bool wallpaperUnderlay: !hasCustomWallpaper && ((PluginService.globalVars["linuxWallpaperEngine"] || {}).lockUnderlay || {})[screenName] === true
 +    // lockScreenHideWallpaperClock: the live Wallpaper Engine scene already shows the time / the date
 +    readonly property bool wallpaperShowsTime: SettingsData.lockScreenHideWallpaperClock && wallpaperBackground.liveSceneShown && wallpaperBackground.engineClock?.time === true
 +    readonly property bool wallpaperShowsDate: SettingsData.lockScreenHideWallpaperClock && wallpaperBackground.liveSceneShown && wallpaperBackground.engineClock?.date === true
      readonly property string lockFontFamily: SettingsData.lockScreenFontFamily
  
      component ClockDigitText: StyledText {
-@@ -256,9 +259,45 @@
+@@ -234,13 +240,13 @@
+ 
+     Rectangle {
+         anchors.fill: parent
+-        color: SettingsData.effectiveWallpaperBackgroundColor
++        color: root.wallpaperUnderlay ? "transparent" : SettingsData.effectiveWallpaperBackgroundColor
+     }
+ 
+     Loader {
+         anchors.fill: parent
+         active: {
+-            if (root.hasCustomWallpaper)
++            if (root.hasCustomWallpaper || root.wallpaperUnderlay)
+                 return false;
+             var currentWallpaper = SessionData.getMonitorWallpaper(screenName);
+             return !currentWallpaper || (currentWallpaper && currentWallpaper.startsWith("#"));
+@@ -256,9 +262,45 @@
          id: wallpaperBackground
          anchors.fill: parent
  
@@ -69,7 +88,7 @@
 +            return (vars.lockClocks || {})[root.screenName] || null;
 +        }
 +        // the live scene (stream or eco frame) is up; the screenshot under it shows the time it was taken
-+        readonly property bool liveSceneShown: item !== null && item.liveSceneShown === true
++        readonly property bool liveSceneShown: root.wallpaperUnderlay || (item !== null && item.liveSceneShown === true)
          readonly property string wallpaperSource: {
              if (root.hasCustomWallpaper)
                  return root.encodeFileUrl(SettingsData.lockScreenWallpaperPath);
@@ -78,14 +97,15 @@
              var w = SessionData.getMonitorWallpaper(screenName);
              return (w && !w.startsWith("#")) ? encodeFileUrl(w) : "";
          }
-@@ -270,13 +309,16 @@
+@@ -270,13 +312,16 @@
  
          readonly property real screenScale: CompositorService.getScreenScale(Quickshell.screens.find(s => s.name === root.screenName) ?? null)
          readonly property size decodeSize: Qt.size(Math.round(width * screenScale), Math.round(height * screenScale))
 +        // lockVideoWallpaper: a video set as the lock screen wallpaper plays as a looping background
 +        readonly property bool isVideo: engineVideo !== "" || (root.hasCustomWallpaper && /\.(mp4|mkv|webm|mov|avi|m4v)$/i.test(SettingsData.lockScreenWallpaperPath))
  
-         active: wallpaperSource !== "" && width > 0 && height > 0
+-        active: wallpaperSource !== "" && width > 0 && height > 0
++        active: !root.wallpaperUnderlay && wallpaperSource !== "" && width > 0 && height > 0
          asynchronous: false
  
 -        sourceComponent: fillModeName === "Scrolling" ? scrollWallpaperComp : plainWallpaperComp
@@ -97,7 +117,7 @@
          layer.effect: MultiEffect {
              autoPaddingEnabled: false
              blurEnabled: true
-@@ -293,6 +335,150 @@
+@@ -293,6 +338,150 @@
          }
      }
  
@@ -248,7 +268,7 @@
      Component {
          id: plainWallpaperComp
          Image {
-@@ -373,6 +559,15 @@
+@@ -373,6 +562,15 @@
              width: parent.width
              height: verticalClock.visible ? verticalClock.implicitHeight : clockText.implicitHeight
              visible: SettingsData.lockScreenShowTime
@@ -264,7 +284,7 @@
  
              Row {
                  id: clockText
-@@ -511,7 +706,14 @@
+@@ -511,7 +709,14 @@
              font.pixelSize: Theme.fontSizeXLarge
              font.family: root.lockFontFamily !== "" ? root.lockFontFamily : resolvedFontFamily
              color: "white"
@@ -310,7 +330,7 @@
 +                    settingKey: "lockScreenWallpaperBlur"
 +                    tags: ["lock", "screen", "wallpaper", "background", "blur"]
 +                    text: I18n.tr("Blur Wallpaper")
-+                    description: I18n.tr("Blur the lock screen background behind the clock and password field")
++                    description: I18n.tr("Blur the lock screen background behind the clock and password field. Off, a patched niri (lock-wallpaper) shows the running wallpaper itself the moment the screen locks")
 +                    checked: SettingsData.lockScreenWallpaperBlur
 +                    onToggled: checked => SettingsData.set("lockScreenWallpaperBlur", checked)
 +                }

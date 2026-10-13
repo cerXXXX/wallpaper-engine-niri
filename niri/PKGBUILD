@@ -1,0 +1,76 @@
+# niri with the wallpapers under a see-through lock surface (0001), so the live wallpaper shows on the lock
+# screen at once. Arch's niri PKGBUILD plus the patch; a package of its own (conflicts with niri), so a
+# `pacman -Syu` doesn't swap it back for the stock niri. Bump pkgver with Arch's niri.
+
+pkgname=niri-lock-wallpaper
+_pkgname=niri
+pkgver=26.04
+pkgrel=1
+pkgdesc="A scrollable-tiling Wayland compositor (wallpapers under a see-through lock screen)"
+arch=(x86_64)
+url="https://github.com/YaLTeR/niri"
+license=(GPL-3.0-or-later)
+depends=(
+  cairo
+  glib2
+  glibc
+  libdisplay-info
+  libgcc
+  libinput
+  libpipewire
+  libxkbcommon
+  mesa
+  pango
+  pixman
+  seatd
+  systemd-libs
+  xdg-desktop-portal-impl
+)
+makedepends=(
+  clang
+  git
+  rust
+)
+optdepends=(
+  'bash: for niri-session script'
+  'xwayland-satellite: for running X11 apps in XWayland'
+  'xdg-desktop-portal-gnome: a XDG desktop portal required for screencasting'
+)
+provides=("$_pkgname=$pkgver" wayland-compositor)
+conflicts=("$_pkgname")
+source=("$_pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz"
+        "0001-Show-the-wallpapers-under-a-see-through-lock-surface.patch")
+sha512sums=('ae30446fbf529155907726cf2cba7402bcfc5be2032370d66f9f980efb257f29353b47d495f1218b81ac32c643f15bbb74834dc35882849a4479021b4b9fa97f'
+            '3ab65202df6ff570d846aacd229707266b5e808bb9a2e886a97781bd947ce7d5017a498e1af22bccad96196766bd43008ee83cbecad4bc3a78188a02b5448895')
+
+prepare() {
+  cd $_pkgname-$pkgver
+  patch -Np1 -i ../0001-Show-the-wallpapers-under-a-see-through-lock-surface.patch
+  cargo fetch --locked --target "$(rustc --print host-tuple)"
+}
+
+build() {
+  cd $_pkgname-$pkgver
+  export NIRI_BUILD_COMMIT="$(zcat ../$_pkgname-$pkgver.tar.gz | git get-tar-commit-id | cut -c1-7)"
+  CFLAGS+=(' -ffat-lto-objects')
+  cargo build --frozen --release --features default
+
+  # generate shell completions
+  for shell in bash fish zsh; do
+    cargo run --frozen --release --bin niri -- \
+      completions "$shell" > "$shell-completions"
+  done
+}
+
+package() {
+  cd $_pkgname-$pkgver
+  install -vDm 755 {target/release/$_pkgname,resources/$_pkgname-session} -t "$pkgdir/usr/bin/"
+  install -vDm 644 resources/$_pkgname{.service,-shutdown.target} -t "$pkgdir/usr/lib/systemd/user/"
+  install -vDm 644 resources/$_pkgname.desktop -t "$pkgdir/usr/share/wayland-sessions/"
+  install -vDm 644 resources/$_pkgname-portals.conf -t "$pkgdir/usr/share/xdg-desktop-portal/"
+  install -vDm 644 resources/default-config.kdl README.md -t "$pkgdir/usr/share/doc/$_pkgname/"
+  # shell auto-completions
+  install -vDm 644 bash-completions "$pkgdir/usr/share/bash-completion/completions/niri"
+  install -vDm 644 fish-completions "$pkgdir/usr/share/fish/vendor_completions.d/niri.fish"
+  install -vDm 644 zsh-completions "$pkgdir/usr/share/zsh/site-functions/_niri"
+}
