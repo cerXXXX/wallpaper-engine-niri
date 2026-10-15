@@ -322,3 +322,15 @@
              }
  
              SettingsCard {
+--- a/ShellCore.qml
++++ b/ShellCore.qml
+@@ -315,7 +315,7 @@
+ 
+             root.surfaceRecoveryPass();
+ 
+-            if (pass < 2) {
++            if (pass < 2 && Quickshell.screens.length > 1) {
+                 interval = 2000;
+                 restart();
+             } else {
+
