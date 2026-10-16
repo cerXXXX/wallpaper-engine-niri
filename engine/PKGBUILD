@@ -5,8 +5,8 @@
 # "upgraded" it to the stock engine once the AUR's version got past ours.
 pkgname=linux-wallpaperengine-niri
 _pkgname=linux-wallpaperengine
-_commit=96676c7bf48bce9bd5818136bc9ac0c05d802702
-pkgver=r640.96676c7b
+_commit=241c5fa00571ceeb6d6ecdfa26a21e98d1a70ee7
+pkgver=r642.241c5fa0
 pkgrel=1
 pkgdesc="use steam's wallpaperengine on linux (cerXXXX fork for niri: zero-copy VA-API, video frame pacing, --downscale-to-output, working scene clocks/scripts, --stream, --eco, --list-layers)"
 arch=('x86_64')
