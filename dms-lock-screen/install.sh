@@ -29,7 +29,8 @@ remove_legacy() {
 if [ "${1:-}" = "uninstall" ]; then
     rm -f "$dropin_dir/lock-screen.conf"
     rmdir "$dropin_dir" 2>/dev/null || true
-    rm -rf "$share" "$runtime/dms-lock-ui" "$runtime/dms-lock-ui.env"
+    cache=${XDG_CACHE_HOME:-$HOME/.cache}/dms-lock-ui
+    rm -rf "$share" "$cache" "$runtime/dms-lock-ui" "$runtime/dms-lock-ui.env"
     systemctl --user daemon-reload
     remove_legacy
     echo "dms-lock-screen: removed, the lock screen is stock again after the next DMS start (dms restart)"

@@ -9,3 +9,4 @@ niri/src/
 niri/pkg/
 niri/*.tar.gz
 niri/*.pkg.tar.*
+.claude/

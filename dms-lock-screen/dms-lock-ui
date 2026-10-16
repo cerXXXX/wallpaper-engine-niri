@@ -11,32 +11,35 @@ here=$(cd "$(dirname "$0")" && pwd)
 patchfile=$here/lock-video-wallpaper.patch
 runtime=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
 env_file=$runtime/dms-lock-ui.env
-base=$runtime/dms-lock-ui
+base=${XDG_CACHE_HOME:-$HOME/.cache}/dms-lock-ui
+dms_bin=$(command -v dms || echo /usr/bin/dms)
 
 log() { echo "dms-lock-ui: $*" >&2; }
 
 rm -f "$env_file"
 
-# a dms command that needs the UI and finds no running DMS (an empty runtime dir) unpacks the embedded UI
-# there; the ipc call itself then fails, there is nothing to talk to
-probe=$(mktemp -d "$runtime/dms-lock-ui-probe.XXXXXX") || exit 0
-trap 'chmod -R u+w "$probe" 2>/dev/null; rm -rf "$probe"' EXIT
-env -u DMS_SHELL_DIR XDG_RUNTIME_DIR="$probe" timeout 30 dms ipc call dms-lock-ui probe >/dev/null 2>&1
-stock=
-for d in "$probe"/*-shell/*/; do
-    [ -f "$d/shell.qml" ] && stock=${d%/}
-done
-if [ -z "$stock" ]; then
-    log "couldn't unpack the UI from the dms binary, DMS runs its stock UI"
-    exit 0
-fi
-version=$(cat "$stock/VERSION" 2>/dev/null)
+# One copy per DMS build and patch version. Keyed by binary modification time, size, and patch hash
+# so the UI is only unpacked and rebuilt when DMS or the patch is updated.
+key=$(stat -Lc '%Y-%s' "$dms_bin" 2>/dev/null || echo "default")-$(sha256sum < "$patchfile" | cut -c1-12)
+target=$base/$key
 
-# one copy per DMS build and patch version
-rev=$(cat "$stock/.dankrev" 2>/dev/null || basename "$stock")
-target=$base/$rev-$(sha256sum < "$patchfile" | cut -c1-12)
 if [ ! -f "$target/shell.qml" ]; then
     mkdir -p "$base"
+    # a dms command that needs the UI and finds no running DMS (an empty runtime dir) unpacks the embedded UI
+    # there; the ipc call itself then fails, there is nothing to talk to
+    probe=$(mktemp -d "$base/probe.XXXXXX") || exit 0
+    trap 'chmod -R u+w "$probe" 2>/dev/null; rm -rf "$probe"' EXIT
+    env -u DMS_SHELL_DIR XDG_RUNTIME_DIR="$probe" timeout 30 "$dms_bin" ipc call dms-lock-ui probe >/dev/null 2>&1
+    stock=
+    for d in "$probe"/*-shell/*/; do
+        [ -f "$d/shell.qml" ] && stock=${d%/}
+    done
+    if [ -z "$stock" ]; then
+        log "couldn't unpack the UI from the dms binary, DMS runs its stock UI"
+        exit 0
+    fi
+    version=$(cat "$stock/VERSION" 2>/dev/null)
+
     rm -rf "$base/.build"
     if ! cp -a "$stock" "$base/.build" || ! chmod -R u+w "$base/.build"; then
         log "couldn't copy the UI to $base, DMS runs its stock UI"
@@ -49,6 +52,9 @@ if [ ! -f "$target/shell.qml" ]; then
         exit 0
     fi
     mv "$base/.build" "$target"
+    chmod -R u+w "$probe" 2>/dev/null
+    rm -rf "$probe"
+    trap - EXIT
 fi
 
 # copies of older builds, unless a running DMS still uses one (the lock screen loads its files when locking)
@@ -59,4 +65,5 @@ for d in "$base"/*/; do
 done
 
 echo "DMS_SHELL_DIR=$target" > "$env_file"
+version=$(cat "$target/VERSION" 2>/dev/null || echo "custom")
 log "DMS $version runs with the lock screen patch ($target)"
