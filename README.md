@@ -13,7 +13,7 @@ My setup for animated [Wallpaper Engine](https://store.steampowered.com/app/4319
 | [`engine/`](engine) | PKGBUILD of the linux-wallpaperengine fork ([cerXXXX/linux-wallpaperengine](https://github.com/cerXXXX/linux-wallpaperengine)): zero-copy VA-API video, correct video frame pacing, video wallpapers rendered at the video's frame rate, `--downscale-to-output`, scene clocks/text and scripts that work, `--stream` (live scenes for the lock screen), hidden layers not loaded and layers/effects the user can turn off, a first-frame marker, `--eco` (held still, redrawn only when a clock changes) with a control channel and sound fades, which layers show the time or date |
 | [`dms-lock-screen/`](dms-lock-screen) | DMS patch, applied by the dms user service to a copy of its UI at every start: a video set as the lock screen wallpaper (or the desktop's Wallpaper Engine video) plays behind the clock and password field, the desktop's Wallpaper Engine scene runs live there (held still with live clocks in eco); a **Blur Wallpaper** toggle for the lock screen background (live wallpapers take the plugin's own); the system time and date step aside when the scene shows its own and the plugin says so |
 | [`dms-greeter/`](dms-greeter) | The login screen (greetd + dms-greeter) with the live scene: greetd runs a wrapper that patches a copy of dms-greeter's UI, which starts the scene the plugin names under it, with the lock screen's blur, time and date |
-| [`niri/`](niri) | niri patch + PKGBUILD (`niri-lock-wallpaper`): the running wallpaper shows under a see-through lock screen the moment the session locks |
+| niri | moved to [tablet-screen-niri](https://github.com/cerXXXX/tablet-screen-niri): `niri-lock-wallpaper-tablet` carries the lock-screen wallpaper patch **and** the tablet's virtual outputs. It replaces `niri-lock-wallpaper`, so the wallpaper behaviour is unchanged |
 | [`system/`](system) | niri layer rule, `makepkg.conf` without `-debug` packages |
 
 ## Install or update everything
@@ -34,24 +34,27 @@ Updating later: `git pull && ./install.sh`. The script, run as your user (it ask
   `git pull --ff-only` (a checkout of the upstream plugin is switched to the fork first; one on another branch or
   with local changes is left alone with a warning);
 - installs or updates the lock screen patch (`bash dms-lock-screen/install.sh`, a drop-in for the dms user service);
-- builds and installs niri with the lock screen patch (`niri-lock-wallpaper`, replaces the `niri` package: pacman
-  asks), unless that version is already installed; warns when Arch's niri is newer than `niri/PKGBUILD`. The new
-  niri runs after the next login;
+- checks that niri with the lock screen patch is installed. It is packaged together with the tablet's virtual
+  outputs in [tablet-screen-niri](https://github.com/cerXXXX/tablet-screen-niri) as `niri-lock-wallpaper-tablet`,
+  which replaces `niri-lock-wallpaper`; if it is missing, the script prints where to get it instead of building a
+  second niri that would take the virtual outputs away. The new niri runs after the next login;
 - installs or updates the live scene on the login screen when dms-greeter is installed (`bash dms-greeter/install.sh`:
   points greetd's command at the wrapper, gives the greeter group passage through `~/.local/share/Steam`);
 - warns if the niri layer rule is missing from `~/.config/niri/config.kdl` (it doesn't edit your config);
 - restarts DMS and enables newly cloned plugins.
 
-Options: `--no-engine`, `--rebuild-engine`, `--no-niri`, `--rebuild-niri`, `--no-lock-screen`, `--no-greeter`, `--no-restart`. Wallpaper Engine itself (step 1
+Options: `--no-engine`, `--rebuild-engine`, `--no-niri` (skips the niri check), `--rebuild-niri` (delegates to
+tablet-screen-niri, where niri is built now), `--no-lock-screen`, `--no-greeter`, `--no-restart`. Wallpaper Engine itself (step 1
 below) and the plugin settings (step 5) are still up to you.
 
 ### After system updates
 
-The engine and niri are built here, so `pacman -Syu` neither updates nor rebuilds them. The engine package carries a
-pacman hook that checks both after every transaction and prints a warning when one of them lost a library it links to
-(an soname bump in ffmpeg, mpv, libinput, libdisplay-info…: it won't start until `./install.sh --rebuild-engine` or
-`--rebuild-niri`) and when Arch's niri is newer than `niri/PKGBUILD`. If niri itself doesn't start, log in on a tty
-(Ctrl+Alt+F2) and `sudo pacman -S niri` brings the stock one back.
+The engine and the patched niri are built here, not taken from a repository, so `pacman -Syu` neither updates nor
+rebuilds them. The engine package carries a pacman hook that checks both after every transaction and prints a warning
+when one of them lost a library it links to (an soname bump in ffmpeg, mpv, libinput, libdisplay-info…: it won't
+start until `./install.sh --rebuild-engine` here, or `./install.sh --rebuild-niri` in tablet-screen-niri) and when
+Arch's niri is newer than the commit pinned in that repository's `niri/PKGBUILD`. If niri itself doesn't start, log
+in on a tty (Ctrl+Alt+F2) and `sudo pacman -S niri` brings the stock one back.
 
 ## Install by hand
 

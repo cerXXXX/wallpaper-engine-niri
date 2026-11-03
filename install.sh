@@ -78,23 +78,35 @@ if [ "$do_engine" = 1 ]; then
     fi
 fi
 
-# --- niri: the stock one draws nothing but the lock surface while locked, the patched one (niri/) shows the running
-# wallpaper under a see-through lock screen; its own package, so pacman asks to replace niri (no --noconfirm)
+# --- niri: the wallpapers-under-the-lock-surface patch used to live here. It now
+# shares a package with the tablet's virtual outputs, in the tablet-screen-niri
+# repository: niri-lock-wallpaper-tablet. Keeping a second PKGBUILD here would
+# build a niri *without* virtual outputs, and since it provides the same "niri"
+# it would happily replace the other one and take the second screen with it.
 if [ "$do_niri" = 1 ]; then
-    step "niri with the wallpaper under the lock screen (niri-lock-wallpaper)"
-    wanted=$(cd "$here/niri" && bash -c 'source ./PKGBUILD && echo "$pkgver-$pkgrel"')
-    installed=$(pacman -Q niri-lock-wallpaper 2>/dev/null | awk '{print $2}' || true)
-    arch_niri=$(LC_ALL=C pacman -Si niri 2>/dev/null | awk '/^Version/ {print $3; exit}' || true)
+    step "niri with the wallpaper under the lock screen (niri-lock-wallpaper-tablet)"
+    installed=$(pacman -Q niri-lock-wallpaper-tablet 2>/dev/null | awk '{print $2}' || true)
+    sibling="$here/../tablet-screen-niri/install.sh"
 
-    if [ "$installed" = "$wanted" ] && [ "$rebuild_niri" = 0 ]; then
-        echo "already installed: $installed (--rebuild-niri builds it again)"
+    if [ -n "$installed" ]; then
+        echo "installed: $installed (both patches: lock wallpaper + virtual outputs)"
+        if [ "$rebuild_niri" = 1 ]; then
+            warn "--rebuild-niri moved: niri is built by the tablet-screen-niri repository now"
+            if [ -x "$sibling" ]; then
+                ( "$sibling" --rebuild-niri --no-uscreen --no-plugin --no-config )
+            else
+                echo "  run: (cd ../tablet-screen-niri && ./install.sh --rebuild-niri --no-uscreen --no-plugin)"
+            fi
+        fi
     else
-        echo "installed: ${installed:-none (stock niri: $(pacman -Q niri 2>/dev/null | awk '{print $2}'))}, building $wanted"
-        (cd "$here/niri" && MAKEFLAGS="${MAKEFLAGS:--j$(nproc)}" makepkg -si)
+        warn "niri with the lock-screen wallpaper is not installed"
+        echo "  it is packaged together with the tablet's virtual outputs:"
+        echo "    git clone https://github.com/cerXXXX/tablet-screen-niri"
+        echo "    cd tablet-screen-niri && ./install.sh"
+        if [ -x "$sibling" ]; then
+            echo "  (next to this checkout: ../tablet-screen-niri/install.sh)"
+        fi
         niri_updated=1
-    fi
-    if [ -n "$arch_niri" ] && [ "$(vercmp "${arch_niri%-*}" "${wanted%-*}")" -gt 0 ]; then
-        warn "Arch has niri $arch_niri, niri/PKGBUILD is still at $wanted: bump pkgver there (and check the patch still applies)"
     fi
 fi
 

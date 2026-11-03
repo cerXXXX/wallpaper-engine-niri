@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# pacman hook (wallpaper-engine-niri.hook): the engine and niri-lock-wallpaper are built here, not taken from a
+# pacman hook (wallpaper-engine-niri.hook): the engine and the patched niri are built here, not taken from a
 # repo, so `pacman -Syu` neither updates nor rebuilds them. After every transaction this says when one of them
 # lost a library it links to (an soname bump: it won't start until rebuilt) and when Arch's niri is newer than
 # the patched one.
@@ -18,19 +18,20 @@ if [ -x "$engine" ]; then
     fi
 fi
 
-if installed=$(pacman -Q niri-lock-wallpaper 2>/dev/null); then
+# the patched niri lives in the tablet-screen-niri repository now, under this name
+if installed=$(pacman -Q niri-lock-wallpaper-tablet 2>/dev/null); then
     libs=$(missing /usr/bin/niri)
     if [ -n "$libs" ]; then
         warn "niri can't find $libs and won't start, so neither will the session:"
-        warn "  rebuild it with ./install.sh --rebuild-niri in wallpaper-engine-niri,"
+        warn "  rebuild it with ./install.sh --rebuild-niri in tablet-screen-niri,"
         warn "  or from a tty go back to the stock one with pacman -S niri"
     fi
 
     ours=${installed#* }
     arch=$(pacman -Si niri 2>/dev/null | awk '/^Version/ {print $3; exit}')
     if [ -n "$arch" ] && [ "$(vercmp "${arch%-*}" "${ours%-*}")" -gt 0 ]; then
-        warn "Arch has niri $arch, niri-lock-wallpaper is $ours: bump pkgver in niri/PKGBUILD"
-        warn "  of wallpaper-engine-niri and run ./install.sh (or stay on $ours, it keeps working)"
+        warn "Arch has niri $arch, niri-lock-wallpaper-tablet is $ours: bump _commit in niri/PKGBUILD"
+        warn "  of tablet-screen-niri and run its ./install.sh --rebuild-niri (or stay on $ours, it keeps working)"
     fi
 fi
 exit 0

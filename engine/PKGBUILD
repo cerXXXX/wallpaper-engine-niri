@@ -16,7 +16,8 @@ depends=('lz4' 'ffmpeg' 'mpv' 'glfw' 'glew' 'freeglut' 'libpulse' 'libcups' 'at-
 makedepends=('git' 'cmake' 'sdl2' 'glm' 'wayland-protocols' 'xorg-xrandr')
 provides=("linux-wallpaperengine")
 conflicts=("linux-wallpaperengine" "linux-wallpaperengine-git")
-# the hook warns after pacman transactions when this engine or niri-lock-wallpaper needs a rebuild
+# the hook warns after pacman transactions when this engine or the patched niri
+# (niri-lock-wallpaper-tablet, from the tablet-screen-niri repository) needs a rebuild
 source=("${_pkgname}-niri::git+https://github.com/cerXXXX/linux-wallpaperengine.git#commit=${_commit}"
         "wallpaper-engine-niri.hook"
         "wallpaper-engine-niri-check")
